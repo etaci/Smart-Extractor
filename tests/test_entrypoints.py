@@ -17,7 +17,7 @@ def test_main_delegates_to_cli(monkeypatch):
 
 
 def test_package_version_exposed():
-    assert __version__ == "0.3.0"
+    assert __version__ == "1.0.0"
 
 
 def test_management_route_groups_exports():

@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
+      - name: Install Playwright browser
+        run: uv run playwright install chromium
+
       - name: Static check (syntax)
         run: uv run python -m compileall -q src tests
 
@@ -39,4 +42,6 @@ jobs:
         run: uv run pytest tests -q --cov=src/smart_extractor --cov-report=term --cov-fail-under=75
 
       - name: Docker build
+        env:
+          SMART_EXTRACTOR_WEB_API_TOKEN: ci-smoke-token
         run: docker compose build web
