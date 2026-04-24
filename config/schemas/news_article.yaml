@@ -1,0 +1,37 @@
+# 新闻文章提取 Schema 模板
+name: "NewsArticle"
+description: "新闻文章 / 博客文章的结构化提取模板"
+
+fields:
+  title:
+    type: str
+    description: "文章标题"
+    required: true
+  author:
+    type: str
+    description: "文章作者"
+    default: ""
+  publish_date:
+    type: str
+    description: "发布日期"
+    default: ""
+  content:
+    type: str
+    description: "文章正文内容（摘要或全文）。注意：正文中请移除所有的换行符，全部合并为连续的单行字符串输出。"
+    required: true
+  summary:
+    type: str
+    description: "文章摘要，不超过 200 字"
+    default: ""
+  tags:
+    type: list[str]
+    description: "文章标签或关键词"
+    default: []
+  category:
+    type: str
+    description: "文章分类"
+    default: ""
+  source:
+    type: str
+    description: "来源媒体名称"
+    default: ""

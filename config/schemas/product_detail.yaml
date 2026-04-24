@@ -1,0 +1,45 @@
+# 商品详情提取 Schema 模板
+name: "ProductDetail"
+description: "电商商品或产品详情页的结构化提取模板"
+
+fields:
+  name:
+    type: str
+    description: "商品名称"
+    required: true
+  price:
+    type: str
+    description: "商品价格（含币种），如 ¥299.00"
+    default: ""
+  original_price:
+    type: str
+    description: "原价"
+    default: ""
+  description:
+    type: str
+    description: "商品描述"
+    default: ""
+  brand:
+    type: str
+    description: "品牌名称"
+    default: ""
+  category:
+    type: str
+    description: "商品类目"
+    default: ""
+  rating:
+    type: float
+    description: "用户评分 (0-5)"
+    default: 0
+  reviews_count:
+    type: int
+    description: "评价数量"
+    default: 0
+  availability:
+    type: str
+    description: "库存状态"
+    default: ""
+  seller:
+    type: str
+    description: "卖家/店铺名称"
+    default: ""

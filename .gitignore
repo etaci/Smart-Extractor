@@ -1,0 +1,96 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.py,cover
+
+# =========================
+# Virtual environments
+# =========================
+.venv/
+venv/
+env/
+ENV/
+
+# =========================
+# Test and coverage
+# =========================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+.tox/
+.nox/
+
+# =========================
+# Build and packaging
+# =========================
+build/
+dist/
+site/
+.eggs/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+
+# =========================
+# Tool caches
+# =========================
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.cache/
+.uv-cache/
+
+# =========================
+# IDE and editor
+# =========================
+.vscode/
+.idea/
+.vs/
+*.suo
+*.user
+*.userossc
+*.rsuser
+*.sln.docstates
+*.swp
+*.swo
+*~
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =========================
+# Runtime output
+# =========================
+logs/
+output/
+screenshots/
+*.log
+*.pid
+*.seed
+*.sqlite
+*.sqlite3
+*.db
+
+# =========================
+# Local config and secrets
+# =========================
+.env
+.env.*
+!.env.example
+config/local.yaml
+
+# =========================
+# Temporary files
+# =========================
+cleaned_text.txt
+debug_wiki.txt

@@ -1,0 +1,95 @@
+# ============================================================
+# Smart Data Extractor — Docker Compose
+# ============================================================
+
+services:
+
+  # ---------- Web 仪表盘服务 ----------
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: smart-extractor:latest
+    container_name: smart-extractor-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    environment:
+      # LLM API 配置（优先级高于 config/default.yaml）
+      - SMART_EXTRACTOR_API_KEY=${SMART_EXTRACTOR_API_KEY:-}
+      - SMART_EXTRACTOR_BASE_URL=${SMART_EXTRACTOR_BASE_URL:-}
+      - SMART_EXTRACTOR_MODEL=${SMART_EXTRACTOR_MODEL:-}
+      - SMART_EXTRACTOR_STARTUP_CHECK_ENABLED=${SMART_EXTRACTOR_STARTUP_CHECK_ENABLED:-}
+      - SMART_EXTRACTOR_STARTUP_CHECK_VERIFY_MODEL=${SMART_EXTRACTOR_STARTUP_CHECK_VERIFY_MODEL:-}
+      - SMART_EXTRACTOR_STARTUP_CHECK_TIMEOUT=${SMART_EXTRACTOR_STARTUP_CHECK_TIMEOUT:-}
+      # Web API Token（必填）
+      - SMART_EXTRACTOR_WEB_API_TOKEN=${SMART_EXTRACTOR_WEB_API_TOKEN:?SMART_EXTRACTOR_WEB_API_TOKEN is required}
+      - SMART_EXTRACTOR_WEB_TASK_DISPATCH_MODE=${SMART_EXTRACTOR_WEB_TASK_DISPATCH_MODE:-inline}
+    volumes:
+      # 持久化输出数据和日志
+      - smart-extractor-output:/app/output
+      - smart-extractor-logs:/app/logs
+      # 挂载配置目录；Web 页面会把本地覆盖配置写入 config/local.yaml
+      - ./config:/app/config
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; req = urllib.request.Request('http://localhost:8000/api/stats', headers={'X-API-Token': os.environ['SMART_EXTRACTOR_WEB_API_TOKEN']}); urllib.request.urlopen(req)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: smart-extractor:latest
+    profiles:
+      - queue
+    restart: unless-stopped
+    depends_on:
+      - web
+    environment:
+      - SMART_EXTRACTOR_API_KEY=${SMART_EXTRACTOR_API_KEY:-}
+      - SMART_EXTRACTOR_BASE_URL=${SMART_EXTRACTOR_BASE_URL:-}
+      - SMART_EXTRACTOR_MODEL=${SMART_EXTRACTOR_MODEL:-}
+      - SMART_EXTRACTOR_WEB_API_TOKEN=${SMART_EXTRACTOR_WEB_API_TOKEN:?SMART_EXTRACTOR_WEB_API_TOKEN is required}
+      - SMART_EXTRACTOR_WEB_TASK_DISPATCH_MODE=queue
+      - SMART_EXTRACTOR_WEB_START_BUILTIN_WORKER=false
+    volumes:
+      - smart-extractor-output:/app/output
+      - smart-extractor-logs:/app/logs
+      - ./config:/app/config
+    command: ["smart-extractor", "web-worker"]
+
+  # ---------- 单次提取任务（按需运行）----------
+  # 使用示例：
+  #   docker compose run --rm extractor extract "https://example.com" --schema news
+  #   docker compose run --rm extractor batch /app/urls.txt --schema product
+  extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: smart-extractor:latest
+    profiles:
+      - cli
+    environment:
+      - SMART_EXTRACTOR_API_KEY=${SMART_EXTRACTOR_API_KEY:-}
+      - SMART_EXTRACTOR_BASE_URL=${SMART_EXTRACTOR_BASE_URL:-}
+      - SMART_EXTRACTOR_MODEL=${SMART_EXTRACTOR_MODEL:-}
+    volumes:
+      - smart-extractor-output:/app/output
+      - smart-extractor-logs:/app/logs
+      - ./config:/app/config
+    entrypoint: ["smart-extractor"]
+    # 默认显示帮助
+    command: ["--help"]
+
+# ---------- 命名卷 ----------
+volumes:
+  smart-extractor-output:
+    driver: local
+  smart-extractor-logs:
+    driver: local

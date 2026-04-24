@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>网页智能提取系统 - 任务详情</title>
+  <link rel="stylesheet" href="/static/style.css?v=20260422-airtable-1">
+</head>
+
+<body data-page="task-detail" data-task-id="{{ task.task_id }}">
+  <div class="detail-shell">
+    <aside class="sidebar">
+      <section class="brand-block">
+        <span class="brand-badge">TASK RECORD</span>
+        <h1 class="brand-title">网页智能提取系统</h1>
+        <p class="brand-subtitle">把一次抽取变成一条可追踪、可复盘、可导出的结构化记录。</p>
+        <p class="brand-note">先看状态和结论，再决定是否继续追踪、导出或比对历史变化。</p>
+      </section>
+      <nav class="nav">
+        <a class="nav-item active" href="/">
+          <span class="nav-order">01</span>
+          <span class="nav-text">返回仪表盘</span>
+        </a>
+      </nav>
+
+      <footer class="sidebar-footer">
+        <article class="sidebar-footer-card task-token-card">
+          <span class="footer-label">详情页鉴权</span>
+          <p>需要时可在这里补填 Token，避免详情页无法继续自动刷新。</p>
+          <label class="field-label task-token-label" for="task-api-token">X-API-TOKEN</label>
+          <input id="task-api-token" type="password" placeholder="如已启用鉴权，请输入 Token">
+        </article>
+        <article class="sidebar-footer-card sidebar-meta-card">
+          <span class="meta-kicker">Workspace</span>
+          <strong class="meta-version">版本 {{ app_version }}</strong>
+          <p class="meta-credit">Readable before exportable</p>
+        </article>
+      </footer>
+    </aside>
+
+    <main class="main-content">
+      <header class="hero-panel detail-hero">
+        <div class="hero-copy">
+          <p class="hero-kicker">TASK RECORD</p>
+          <span class="hero-eyebrow">这不是一条日志，而是一条可判断的记录</span>
+          <h2 id="task-id">{{ task.task_id }}</h2>
+          <p id="task-url">围绕这条记录查看进度、结果数据、历史轨迹和字段变化。</p>
+          <div class="hero-tags">
+            <span id="task-domain">域名：{{ task.domain }}</span>
+            <span id="task-total-runs">累计运行：{{ task.history_summary.total_runs }}</span>
+            <span id="task-kind-label">类型：{{ task.task_kind or "single" }}</span>
+          </div>
+        </div>
+        <div class="detail-hero-side">
+          <article class="hero-focus-card detail-status-card">
+            <div class="detail-status-header">
+              <span class="mini-label">当前状态</span>
+              <span id="task-status-badge" class="badge badge-{{ task.status }}">{{ task.status }}</span>
+            </div>
+            <div class="task-progress-panel" aria-live="polite">
+              <div class="task-progress-header">
+                <strong id="task-progress-title">网页提取进度</strong>
+                <span id="task-progress-percent">{{ "%.0f"|format(task.progress.percent or 0) }}%</span>
+              </div>
+              <div class="task-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                aria-valuenow="{{ "%.0f"|format(task.progress.percent or 0) }}" aria-labelledby="task-progress-title">
+                <div id="task-progress-bar" class="task-progress-bar task-progress-bar-{{ task.status }}"
+                  style="width: {{ "%.0f"|format(task.progress.percent or 0) }}%;"></div>
+              </div>
+              <p id="task-progress-text" class="task-progress-text">{{ task.progress.stage }}</p>
+            </div>
+          </article>
+          <div class="detail-summary-grid">
+            <article class="hero-stat-card compact">
+              <span>存储格式</span>
+              <strong id="task-storage-format">{{ task.storage_format }}</strong>
+              <small>当前结果的保存方式</small>
+            </article>
+            <article class="hero-stat-card compact">
+              <span>质量分</span>
+              <strong id="task-quality-score">
+                {% if task.quality_score and task.quality_score > 0 %}
+                {{ "%.1f"|format(task.quality_score * 100) }}%
+                {% else %}
+                -
+                {% endif %}
+              </strong>
+              <small>用于快速判断可用性</small>
+            </article>
+            <article class="hero-stat-card compact">
+              <span>成功次数</span>
+              <strong id="task-success-runs">{{ task.history_summary.success_runs }}</strong>
+              <small>同 URL 的稳定完成次数</small>
+            </article>
+            <article class="hero-stat-card compact">
+              <span>耗时</span>
+              <strong id="task-elapsed-ms">
+                {% if task.elapsed_ms and task.elapsed_ms > 0 %}
+                {{ "%.0f"|format(task.elapsed_ms) }} ms
+                {% else %}
+                -
+                {% endif %}
+              </strong>
+              <small>单次执行消耗时间</small>
+            </article>
+          </div>
+        </div>
+      </header>
+
+      <section class="content-section detail-content-section">
+        <div class="detail-grid detail-context-grid">
+          <article class="detail-card">
+            <span class="detail-label">创建时间</span>
+            <div id="task-created-at" class="detail-value">{{ task.created_at or "-" }}</div>
+          </article>
+
+          <article class="detail-card">
+            <span class="detail-label">提取策略</span>
+            <div id="task-extraction-strategy" class="detail-value">
+              {% if task.data and task.data.extraction_strategy %}
+              {{ task.data.extraction_strategy }}
+              {% else %}
+              -
+              {% endif %}
+            </div>
+          </article>
+
+          <article class="detail-card">
+            <span class="detail-label">学习档案</span>
+            <div id="task-learned-profile" class="detail-value">
+              {% if task.data and task.data.learned_profile_id %}
+              {{ task.data.learned_profile_id }}
+              {% else %}
+              -
+              {% endif %}
+            </div>
+          </article>
+        </div>
+
+        <div class="detail-story-grid">
+          <article class="message-box secondary-box detail-history-panel">
+            <div class="message-box-header">
+              <h3>同 URL 历史轨迹</h3>
+              <span class="panel-note">看这条记录是否稳定，是否值得升级成监控</span>
+            </div>
+            <div id="recent-history-container">
+              {% if task.recent_history %}
+              <div class="history-list">
+                {% for item in task.recent_history %}
+                <div class="history-item">
+                  <div>
+                    <strong>{{ item.task_id }}</strong>
+                    <p>{{ item.created_at or "-" }}</p>
+                  </div>
+                  <div class="history-meta">
+                    <span class="badge badge-{{ item.status }}">{{ item.status }}</span>
+                    <span>
+                      {% if item.quality_score and item.quality_score > 0 %}
+                      {{ "%.0f"|format(item.quality_score * 100) }}%
+                      {% else %}
+                      -
+                      {% endif %}
+                    </span>
+                  </div>
+                </div>
+                {% endfor %}
+              </div>
+              {% else %}
+              <p class="plain-note">暂无同 URL 历史记录。</p>
+              {% endif %}
+            </div>
+          </article>
+
+          <article id="comparison-box" class="message-box secondary-box detail-comparison-panel">
+            <div class="message-box-header">
+              <h3>变化告警与建议</h3>
+              <div class="detail-action-row">
+                <button id="download-docx-btn" class="btn btn-ghost" type="button">导出 Word</button>
+                <button id="download-xlsx-btn" class="btn btn-ghost" type="button">导出 Excel</button>
+              </div>
+            </div>
+            <div id="comparison-container">
+              {% if task.comparison and task.comparison.has_previous %}
+              <div class="insight-list compact-list">
+                {% if task.comparison.impact_summary %}
+                <div class="insight-item emphasis">
+                  <span class="insight-title">变化摘要</span>
+                  <p>{{ task.comparison.impact_summary }}</p>
+                </div>
+                {% endif %}
+                {% if task.comparison.changed %}
+                  {% for item in task.comparison.changed_fields %}
+                  <div class="insight-item">
+                    <span class="insight-title">{{ item.label }}</span>
+                    <p>{{ item.summary }}</p>
+                  </div>
+                  {% endfor %}
+                  {% if task.comparison.suggested_actions %}
+                    {% for item in task.comparison.suggested_actions %}
+                    <div class="insight-item">
+                      <span class="insight-title">建议动作</span>
+                      <p>{{ item }}</p>
+                    </div>
+                    {% endfor %}
+                  {% endif %}
+                {% else %}
+                <div class="insight-item"><p>本次结果与上一次成功结果相比没有字段变化。</p></div>
+                {% endif %}
+              </div>
+              {% else %}
+              <p class="plain-note">当前还没有可对比的上一条成功记录。</p>
+              {% endif %}
+            </div>
+          </article>
+        </div>
+
+        <article id="batch-children-box" class="message-box secondary-box detail-batch-panel" {% if task.task_kind != "batch" %}hidden{% endif %}>
+          <h3>批量子任务</h3>
+          <div id="batch-children-container">
+            {% if task.batch_children %}
+            <div class="history-list">
+              {% for item in task.batch_children %}
+              <div class="history-item">
+                <div>
+                  <strong>{{ item.task_id }}</strong>
+                  <p>{{ item.url }}</p>
+                </div>
+                <div class="history-meta">
+                  <span class="badge badge-{{ item.status }}">{{ item.status }}</span>
+                  <span>
+                    {% if item.quality_score and item.quality_score > 0 %}
+                    {{ "%.0f"|format(item.quality_score * 100) }}%
+                    {% else %}
+                    -
+                    {% endif %}
+                  </span>
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+            {% else %}
+            <p class="plain-note">该批量任务下还没有子任务明细。</p>
+            {% endif %}
+          </div>
+        </article>
+
+        <article id="task-error-box" class="message-box error-box detail-error-panel" {% if not task.error %}hidden{% endif %}>
+          <h3>错误信息</h3>
+          <pre id="task-error-text">{{ task.error or "" }}</pre>
+        </article>
+
+        <article id="task-auth-box" class="message-box secondary-box task-auth-box detail-auth-panel" hidden>
+          <h3>详情页提示</h3>
+          <p id="task-auth-text" class="plain-note">详情页需要有效的 API Token 才能持续刷新。</p>
+        </article>
+
+        <article class="message-box data-box detail-formatted-panel">
+          <div class="message-box-header">
+            <h3>润色结果</h3>
+            <div class="detail-action-row">
+              <button id="download-formatted-text-btn" class="btn btn-ghost" type="button">下载润色结果</button>
+              <button id="copy-formatted-text-btn" class="btn btn-ghost" type="button">复制润色结果</button>
+            </div>
+          </div>
+          <pre id="task-formatted-text"
+            class="json-view">{% if task.data and task.data.formatted_text %}{{ task.data.formatted_text }}{% elif task.data %}暂无润色文本{% else %}暂无结果数据{% endif %}</pre>
+        </article>
+
+        <article class="message-box data-box secondary-box detail-json-panel">
+          <div class="message-box-header">
+            <h3>原始 JSON</h3>
+            <button id="download-raw-json-btn" class="btn btn-ghost" type="button">下载 JSON</button>
+          </div>
+          <pre id="task-raw-json"
+            class="json-view">{% if task.data %}{{ task.data|tojson(indent=2) }}{% else %}暂无结果数据{% endif %}</pre>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/ui_shared.js?v=20260417-1"></script>
+  <script src="/static/task_detail_render.js?v=20260417-1"></script>
+  <script src="/static/task_detail.js?v=20260417-1"></script>
+</body>
+
+</html>

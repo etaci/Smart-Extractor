@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Static check (syntax)
+        run: uv run python -m compileall -q src tests
+
+      - name: App startup smoke test
+        run: uv run python -c "from smart_extractor.web.app import create_app; create_app()"
+
+      - name: Run tests
+        run: uv run pytest tests -q
+
+      - name: Coverage gate
+        run: uv run pytest tests -q --cov=src/smart_extractor --cov-report=term --cov-fail-under=75
+
+      - name: Docker build
+        run: docker compose build web

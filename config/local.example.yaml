@@ -1,0 +1,9 @@
+llm:
+  api_key: "your-api-key-here"
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+  temperature: 0.0
+
+web:
+  api_token: "your-web-api-token"
+  task_dispatch_mode: "inline"

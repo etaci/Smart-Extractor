@@ -1,0 +1,57 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.pyc
+
+# 虚拟环境
+.venv/
+venv/
+env/
+new/
+
+# 测试缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 构建产物
+dist/
+build/
+*.egg-info/
+
+# 项目数据目录（运行时生成，挂载为卷）
+output/
+logs/
+screenshots/
+
+# 配置中的敏感信息（如需覆盖请用环境变量）
+# config/default.yaml  # 保留，作为默认配置挂载
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# 文档
+docs/
+*.md
+!README.md
+
+# 测试文件（不需要进镜像）
+tests/
+test.py
+
+# uv lock（builder 阶段已复制，runtime 不需要）
+# uv.lock  # 保留，builder 阶段需要

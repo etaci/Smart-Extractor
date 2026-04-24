@@ -1,0 +1,1199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>网页智能提取分析系统</title>
+  <link rel="stylesheet" href="/static/style.css?v=20260422-airtable-1">
+</head>
+<body data-page="dashboard">
+  <div class="app-shell">
+    <aside class="sidebar">
+      <section class="brand-block">
+        <span class="brand-badge">WEB INTELLIGENCE</span>
+        <h1 class="brand-title">网页智能提取分析系统</h1>
+        <p class="brand-subtitle">先看重点，再开始动作，把抽取、监控、分析和提醒整理成清晰流程。</p>
+        <p class="brand-note">适合反复看页面、持续追变化、需要把网页内容转成决策输入的工作场景。</p>
+      </section>
+
+      <nav class="nav">
+        <button class="nav-item active" data-section="overview" type="button">
+          <span class="nav-order">01</span>
+          <span class="nav-text">仪表盘</span>
+        </button>
+        <button class="nav-item nav-item-action" data-section="extract" type="button">
+          <span class="nav-order">02</span>
+          <span class="nav-text">开始任务</span>
+        </button>
+        <button class="nav-item nav-item-analysis" data-section="analyzer" type="button">
+          <span class="nav-order">03</span>
+          <span class="nav-text">智能分析</span>
+        </button>
+        <button class="nav-item nav-item-progress" data-section="tasks" type="button">
+          <span class="nav-order">04</span>
+          <span class="nav-text">任务进展</span>
+        </button>
+        <button class="nav-item nav-item-assets" data-section="assets" type="button">
+          <span class="nav-order">05</span>
+          <span class="nav-text">运营资产</span>
+        </button>
+      </nav>
+
+      <footer class="sidebar-footer">
+        <article class="sidebar-footer-card sidebar-meta-card">
+          <span class="meta-kicker">Workspace</span>
+          <strong class="meta-version">版本 {{ app_version }}</strong>
+          <p class="meta-credit">Developed by etaci</p>
+        </article>
+      </footer>
+    </aside>
+
+    <main class="main-content">
+      <header class="hero-panel dashboard-hero">
+        <div class="hero-copy hero-main">
+          <p class="hero-kicker">WEB INTELLIGENCE WORKBENCH</p>
+          <div class="hero-heading">
+            <div>
+              <h2>网页智能提取分析系统</h2>
+            </div>
+            <div class="hero-inline-stats">
+              <article class="hero-stat-card">
+                <span>累计任务</span>
+                <strong>{{ stats.total }}</strong>
+                <small>已经沉淀过的记录量</small>
+              </article>
+              <article class="hero-stat-card">
+                <span>活跃监控</span>
+                <strong>{{ insights.summary.active_monitors }}</strong>
+                <small>正在持续跟踪的页面</small>
+              </article>
+              <article class="hero-stat-card">
+                <span>高优提醒</span>
+                <strong>{{ insights.summary.high_priority_alerts }}</strong>
+                <small>值得先处理的变化</small>
+              </article>
+            </div>
+          </div>
+          <div class="hero-actions">
+            <button class="btn btn-primary" type="button" data-open-section="extract">开始一次任务</button>
+            <button class="btn btn-ghost" type="button" data-open-section="analyzer">先做智能分析</button>
+            <button class="btn btn-soft" type="button" data-open-section="assets">查看运营资产</button>
+          </div>
+          <div class="hero-tags">
+            <span>自动识别字段</span>
+            <span>同 URL 历史对比</span>
+            <span>监控闭环与通知</span>
+            <span>站点记忆复用</span>
+          </div>
+        </div>
+        <div class="hero-side">
+          <article class="hero-focus-card">
+            <span class="mini-label">当前最值得开始的路径</span>
+            <strong>{% if runtime_status.ready %}系统已经就绪{% else %}先补全基础配置{% endif %}</strong>
+            <p>{% if runtime_status.ready %}建议先跑一次单页任务，确认字段、结果质量和导出链路，再决定是否升级为监控或批量方案。{% else %}仪表盘可以先看，但缺失配置会影响新任务提交。先完成基础设置，后面的流程会自然很多。{% endif %}</p>
+            <div class="hero-focus-actions">
+              <button class="btn btn-primary btn-inline" type="button" data-open-section="{% if runtime_status.ready %}extract{% else %}overview{% endif %}">{% if runtime_status.ready %}去开始任务{% else %}去看配置{% endif %}</button>
+              <button class="btn btn-ghost btn-inline" type="button" data-open-section="tasks">查看最近进展</button>
+            </div>
+          </article>
+          <div class="hero-side-grid">
+            <div class="mini-panel">
+              <span class="mini-label">站点记忆与复用效率</span>
+              <div class="mini-kpis">
+                <div class="mini-kpi">
+                  <strong id="hero-memory-hits">{{ insights.summary.learned_profile_hits }}</strong>
+                  <span>记忆命中</span>
+                </div>
+                <div class="mini-kpi">
+                  <strong id="hero-saved-runs">{{ insights.summary.rule_based_tasks }}</strong>
+                  <span>规则复用</span>
+                </div>
+              </div>
+              <p>同站点经验越完整，后续抽取越稳定，也更节省人工判断和调用成本。</p>
+            </div>
+            <div class="mini-panel">
+              <span class="mini-label">监控资产与优先级提醒</span>
+              <div class="mini-kpis">
+                <div class="mini-kpi">
+                  <strong id="hero-active-monitors">{{ insights.summary.active_monitors }}</strong>
+                  <span>活跃监控</span>
+                </div>
+                <div class="mini-kpi">
+                  <strong id="hero-high-priority-alerts">{{ insights.summary.high_priority_alerts }}</strong>
+                  <span>高优提醒</span>
+                </div>
+              </div>
+              <p>把最值得处理的变化先推到前面，监控结果才更像业务工作台，而不是日志堆栈。</p>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section id="section-overview" class="overview-stack">
+        <div class="overview-story-grid">
+          <article class="panel quick-entry-panel">
+            <div class="section-heading">
+              <span>三种高频入口</span>
+              <small>先从最容易产生业务价值的入口开始，而不是先理解所有功能</small>
+            </div>
+            <div class="quick-entry-grid">
+              <article class="quick-entry-card">
+                <span class="quick-entry-kicker">入口 01</span>
+                <h3>监控一个页面变化</h3>
+                <p>适合价格、卖点、公告、帮助中心等会反复查看的页面，重点是持续跟踪和自动提醒。</p>
+                <div class="quick-entry-actions">
+                  <button class="btn btn-primary btn-inline" type="button" data-open-section="extract">去配置监控</button>
+                  <button class="btn btn-ghost btn-inline" type="button" data-quick-template="market-policy-watch">套用政策模板</button>
+                </div>
+              </article>
+              <article class="quick-entry-card">
+                <span class="quick-entry-kicker">入口 02</span>
+                <h3>比较多个页面</h3>
+                <p>适合竞品、岗位、产品方案横向比较，把网页内容直接变成决策支持而不是原始材料。</p>
+                <div class="quick-entry-actions">
+                  <button class="btn btn-primary btn-inline" type="button" data-open-section="analyzer">去做对比</button>
+                  <button class="btn btn-ghost btn-inline" type="button" data-quick-template="market-job-compare">套用对比模板</button>
+                </div>
+              </article>
+              <article class="quick-entry-card">
+                <span class="quick-entry-kicker">入口 03</span>
+                <h3>批量采集一类内容</h3>
+                <p>适合同站点文章、商品或公告批量沉淀，先整理一批 URL，再逐步演进成监控资产。</p>
+                <div class="quick-entry-actions">
+                  <button class="btn btn-primary btn-inline" type="button" data-open-section="extract">去提交批量任务</button>
+                  <button class="btn btn-ghost btn-inline" type="button" data-quick-template="market-batch-article">套用批量模板</button>
+                </div>
+              </article>
+            </div>
+          </article>
+
+          <article class="panel next-step-panel">
+            <div class="section-heading">
+              <span>建议先做什么</span>
+              <small>把首页从功能展示变成行动入口</small>
+            </div>
+            <div class="next-step-status">
+              <span class="badge {% if runtime_status.ready %}badge-success{% else %}badge-pending{% endif %}">
+                {% if runtime_status.ready %}系统已就绪{% else %}需要补全基础设置{% endif %}
+              </span>
+              <p>{% if runtime_status.ready %}你已经可以直接提交任务。推荐先跑一次单页任务，确认字段、结果和导出是否符合预期。{% else %}先在下方完成 API 鉴权和基础配置，减少后续流程中的阻塞感。{% endif %}</p>
+            </div>
+            <div class="next-step-list">
+              <button class="next-step-card" type="button" data-open-section="extract">
+                <strong>开始一次单页任务</strong>
+                <p>最短路径验证当前站点是否能稳定提取。</p>
+              </button>
+              <button class="next-step-card" type="button" data-open-section="analyzer">
+                <strong>先做 URL 分析</strong>
+                <p>适合还不确定该抽什么字段，或想先比较多个页面。</p>
+              </button>
+              <button class="next-step-card" type="button" data-open-section="assets">
+                <strong>查看已有资产</strong>
+                <p>从站点记忆、监控和通知里判断哪些能力已经可复用。</p>
+              </button>
+            </div>
+          </article>
+        </div>
+
+        <div class="overview-support-grid">
+          <article id="runtime-startup-panel" class="panel startup-panel{% if runtime_status.ready %} startup-panel-ok{% else %} startup-panel-warning{% endif %}">
+            <div class="section-heading">
+              <span>运行状态</span>
+              <small id="runtime-summary-caption">{% if runtime_status.ready %}当前可直接提交任务{% else %}还有配置项需要处理{% endif %}</small>
+            </div>
+            <div class="startup-grid">
+              <div>
+                <strong id="runtime-startup-title" class="startup-title">{% if runtime_status.ready %}系统已就绪{% else %}请先完成基础配置{% endif %}</strong>
+                <p id="runtime-startup-description" class="plain-note">
+                  {% if runtime_status.ready %}
+                  Web 服务已启动，你可以直接分析页面、提交任务并查看历史结果。
+                  {% else %}
+                  现在仍可打开界面查看任务和历史数据，但缺失配置会阻止新任务提交。
+                  {% endif %}
+                </p>
+              </div>
+              <div class="startup-meta">
+                <span id="runtime-api-token-badge" class="badge {% if runtime_status.api_token_required %}badge-running{% else %}badge-pending{% endif %}">
+                  {% if runtime_status.api_token_required %}API Token 已启用{% else %}API Token 未启用{% endif %}
+                </span>
+                <span id="runtime-startup-check-badge" class="badge {% if runtime_status.startup_check_enabled %}badge-success{% else %}badge-pending{% endif %}">
+                  {% if runtime_status.startup_check_enabled %}启动自检开启{% else %}启动自检关闭{% endif %}
+                </span>
+              </div>
+              <div class="startup-meta">
+                <span id="runtime-monitor-scheduler-badge" class="badge {% if runtime_status.services.monitor_scheduler.alive %}badge-success{% elif runtime_status.services.monitor_scheduler.enabled %}badge-running{% else %}badge-pending{% endif %}">
+                  {% if runtime_status.services.monitor_scheduler.alive %}
+                  监控调度器运行中
+                  {% elif runtime_status.services.monitor_scheduler.enabled %}
+                  监控调度器待启动
+                  {% else %}
+                  监控调度器未启用
+                  {% endif %}
+                </span>
+                <span id="runtime-task-worker-badge" class="badge {% if runtime_status.services.task_worker.alive %}badge-success{% elif runtime_status.services.task_worker.enabled %}badge-running{% else %}badge-pending{% endif %}">
+                  {% if runtime_status.services.task_worker.alive %}
+                  队列 Worker 运行中
+                  {% elif runtime_status.services.task_worker.enabled %}
+                  队列 Worker 待启动
+                  {% else %}
+                  队列 Worker 未启用
+                  {% endif %}
+                </span>
+              </div>
+              <div class="startup-meta">
+                <span id="runtime-notification-retry-badge" class="badge {% if runtime_status.services.notification_retry.alive %}badge-success{% elif runtime_status.services.notification_retry.enabled %}badge-running{% else %}badge-pending{% endif %}">
+                  {% if runtime_status.services.notification_retry.alive %}
+                  通知重试服务运行中
+                  {% elif runtime_status.services.notification_retry.enabled %}
+                  通知重试服务待启动
+                  {% else %}
+                  通知重试服务未启用
+                  {% endif %}
+                </span>
+                <span id="runtime-notification-digest-badge" class="badge {% if runtime_status.services.notification_digest.alive %}badge-success{% elif runtime_status.services.notification_digest.enabled %}badge-running{% else %}badge-pending{% endif %}">
+                  {% if runtime_status.services.notification_digest.alive %}
+                  Digest 服务运行中
+                  {% elif runtime_status.services.notification_digest.enabled %}
+                  Digest 服务待启动
+                  {% else %}
+                  Digest 服务未启用
+                  {% endif %}
+                </span>
+              </div>
+              <p id="runtime-monitor-scheduler-note" class="plain-note">
+                {% if runtime_status.services.monitor_scheduler.enabled %}
+                调度轮询 {{ runtime_status.services.monitor_scheduler.poll_interval_seconds }}s，最近已运行 {{ runtime_status.services.monitor_scheduler.total_runs }} 轮。
+                {% else %}
+                当前实例不承担监控调度角色，可用于只读查看或 API 接入。
+                {% endif %}
+              </p>
+              <p id="runtime-task-worker-note" class="plain-note">
+                {% if runtime_status.services.task_worker.enabled %}
+                当前任务分发模式：{{ runtime_status.services.task_worker.task_dispatch_mode }}，Worker 存活状态会随页面自动刷新。
+                {% else %}
+                当前未启用内置队列 Worker。
+                {% endif %}
+              </p>
+              <p id="runtime-notification-services-note" class="plain-note">
+                通知重试：{% if runtime_status.services.notification_retry.enabled %}轮询 {{ runtime_status.services.notification_retry.poll_interval_seconds }}s{% else %}未启用{% endif %}
+                · Digest：{% if runtime_status.services.notification_digest.enabled %}轮询 {{ runtime_status.services.notification_digest.poll_interval_seconds }}s{% else %}未启用{% endif %}
+              </p>
+            </div>
+            <div id="runtime-issues-list" class="startup-list startup-list-error" {% if not runtime_status.issues %}hidden{% endif %}>
+              {% for issue in runtime_status.issues %}
+              <div class="startup-item">{{ issue }}</div>
+              {% endfor %}
+            </div>
+            <div id="runtime-warnings-list" class="startup-list startup-list-warning" {% if not runtime_status.warnings %}hidden{% endif %}>
+              {% for warning in runtime_status.warnings %}
+              <div class="startup-item">{{ warning }}</div>
+              {% endfor %}
+            </div>
+          </article>
+
+          <div class="stack-column">
+            <details class="panel collapsible-panel token-panel token-panel-wide" {% if api_token_required %}open{% endif %}>
+              <summary class="collapsible-summary">
+                <div>
+                  <strong>API 鉴权</strong>
+                  <small>{% if api_token_required %}当前已启用 Token 鉴权{% else %}当前未启用 Token 鉴权{% endif %}</small>
+                </div>
+                <span class="badge {% if api_token_required %}badge-running{% else %}badge-pending{% endif %}">{% if api_token_required %}需要 Token{% else %}可选{% endif %}</span>
+              </summary>
+              <div class="collapsible-body">
+                <label class="field-label" for="api-token">X-API-TOKEN</label>
+                <input id="api-token" type="password" placeholder="请输入后端 API Token，用于访问 /api/*">
+                <p class="panel-note">Token 仅保存在浏览器本地，不写入模板，也不会回显到页面。</p>
+              </div>
+            </details>
+
+            <details class="panel collapsible-panel token-panel token-panel-wide" {% if not runtime_status.ready %}open{% endif %}>
+              <summary class="collapsible-summary">
+                <div>
+                  <strong>基础配置</strong>
+                  <small>保存到 `config/local.yaml`，不会改动 `config/default.yaml`</small>
+                </div>
+                <span class="badge {% if runtime_status.ready %}badge-success{% else %}badge-pending{% endif %}">{% if runtime_status.ready %}可编辑{% else %}待完成{% endif %}</span>
+              </summary>
+              <div class="collapsible-body">
+                <form id="basic-config-form">
+                  <div class="form-grid basic-config-grid">
+                    <div class="field-group wide">
+                      <label class="field-label" for="basic-api-key">API KEY</label>
+                      <input id="basic-api-key" type="password" placeholder="请输入你的 LLM API Key">
+                    </div>
+                    <div class="field-group wide">
+                      <label class="field-label" for="basic-base-url">BASE URL</label>
+                      <input id="basic-base-url" type="url" placeholder="https://api.openai.com/v1">
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="basic-model">MODEL</label>
+                      <input id="basic-model" type="text" placeholder="gpt-4o-mini">
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="basic-temperature">TEMPERATURE</label>
+                      <input id="basic-temperature" type="number" min="0" max="2" step="0.1" placeholder="0.0">
+                    </div>
+                  </div>
+                  <div class="config-hint-grid">
+                    <div class="mode-note" id="basic-config-source-note">正在读取当前基础配置...</div>
+                    <div class="mode-note" id="basic-config-effective-note">保存后，新任务会使用新的基础配置。</div>
+                  </div>
+                  <div class="form-actions">
+                    <button id="save-basic-config-btn" class="btn btn-primary" type="submit">保存基础配置</button>
+                    <button id="refresh-basic-config-btn" class="btn btn-soft" type="button">重新读取</button>
+                    <span id="basic-config-result" class="submit-result" style="display:none;"></span>
+                  </div>
+                  <p class="panel-note">如果相关环境变量已设置，它们会覆盖文件值；页面会明确提示哪些字段当前被环境变量接管。</p>
+                </form>
+              </div>
+            </details>
+          </div>
+        </div>
+
+        <div class="overview-dual-grid">
+          <article class="panel stats-panel">
+            <div class="section-heading">
+              <span>任务总览</span>
+              <small>系统自动刷新</small>
+            </div>
+            <div class="stats-grid">
+              <div class="metric-card">
+                <span class="metric-label">总任务数</span>
+                <strong class="metric-value" id="stat-total">{{ stats.total }}</strong>
+              </div>
+              <div class="metric-card success">
+                <span class="metric-label">已完成</span>
+                <strong class="metric-value" id="stat-success">{{ stats.success }}</strong>
+              </div>
+              <div class="metric-card danger">
+                <span class="metric-label">执行失败</span>
+                <strong class="metric-value" id="stat-failed">{{ stats.failed }}</strong>
+              </div>
+              <div class="metric-card warning">
+                <span class="metric-label">等待执行</span>
+                <strong class="metric-value" id="stat-pending">{{ stats.pending }}</strong>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel progress-panel">
+            <div class="section-heading">
+              <span>任务进度</span>
+              <small>按总任务比例展示</small>
+            </div>
+            <div class="progress-layout">
+              <div class="donut-wrap">
+                <div id="donut-chart" class="donut-chart">
+                  <div class="donut-center">
+                    <strong id="stat-rate">{{ stats.success_rate }}</strong>
+                    <span>成功率</span>
+                  </div>
+                </div>
+              </div>
+              <div class="progress-legend">
+                <div class="legend-item">
+                  <i class="legend-dot success-dot"></i>
+                  <div><strong id="legend-success">{{ stats.success }}</strong><span>提取完成</span></div>
+                </div>
+                <div class="legend-item">
+                  <i class="legend-dot danger-dot"></i>
+                  <div><strong id="legend-failed">{{ stats.failed }}</strong><span>执行失败</span></div>
+                </div>
+                <div class="legend-item">
+                  <i class="legend-dot warning-dot"></i>
+                  <div><strong id="legend-running">{{ stats.running }}</strong><span>运行中</span></div>
+                </div>
+                <div class="legend-item">
+                  <i class="legend-dot neutral-dot"></i>
+                  <div><strong id="legend-pending">{{ stats.pending }}</strong><span>等待中</span></div>
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="insight-dual-grid">
+          <article class="panel scenario-panel">
+            <div class="section-heading">
+              <span>优先打透的场景</span>
+              <small>从这三类高频页面开始，更容易形成记忆点和长期使用价值</small>
+            </div>
+            <div class="scenario-grid">
+              <article class="scenario-card">
+                <span class="scenario-kicker">Scenario A</span>
+                <h3>竞品卖点变化监控</h3>
+                <p>持续盯住首页、活动页、产品页文案变化，自动输出卖点变化和建议动作。</p>
+                <div class="scenario-meta">适合产品经理、市场团队、商业分析</div>
+                <button class="btn btn-soft btn-inline" type="button" data-quick-template="market-competitor-watch">套用模板</button>
+              </article>
+              <article class="scenario-card">
+                <span class="scenario-kicker">Scenario B</span>
+                <h3>商品价格与库存监控</h3>
+                <p>追踪价格、库存、品牌和促销文案变化，形成可转发的价格异动摘要。</p>
+                <div class="scenario-meta">适合电商运营、价格策略、渠道同学</div>
+                <button class="btn btn-soft btn-inline" type="button" data-quick-template="market-product-monitor">套用模板</button>
+              </article>
+              <article class="scenario-card">
+                <span class="scenario-kicker">Scenario C</span>
+                <h3>政策公告更新监控</h3>
+                <p>跟踪政策、帮助中心、平台公告变化，减少漏读风险并沉淀更新摘要卡。</p>
+                <div class="scenario-meta">适合合规、运营、法务支持团队</div>
+                <button class="btn btn-soft btn-inline" type="button" data-quick-template="market-policy-watch">套用模板</button>
+              </article>
+            </div>
+          </article>
+
+          <article class="panel announcement-panel">
+            <div class="section-heading">
+              <span>产品建议与运营提醒</span>
+              <small>根据监控闭环、站点记忆和最近变化自动生成</small>
+            </div>
+            <div id="announcement-list" class="insight-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="section-extract" class="content-section section-hidden extract-section">
+        <article class="panel extract-intake-panel">
+          <div class="section-heading">
+            <span>自然语言任务创建</span>
+            <small>直接描述你想做什么，系统会先生成任务草案，再回填到下方表单</small>
+          </div>
+          <div class="field-group wide">
+            <label class="field-label" for="nl-task-request">任务描述</label>
+            <textarea id="nl-task-request" rows="4" placeholder="例如：帮我监控这两个商品页的价格和库存变化，有变化就提醒我 https://example.com/a https://example.com/b"></textarea>
+          </div>
+          <div class="form-actions">
+            <button id="parse-nl-task-btn" class="btn btn-primary" type="button">解析任务</button>
+            <span id="nl-task-result" class="submit-result" style="display:none;"></span>
+          </div>
+          <div id="nl-task-preview" class="preview-box preview-empty">解析后的任务草案会显示在这里，并自动回填到下方表单。</div>
+          <div id="nl-task-actions" class="form-actions" hidden>
+            <button id="nl-apply-btn" class="btn btn-soft" type="button">应用到表单</button>
+            <button id="nl-run-task-btn" class="btn btn-primary" type="button">直接执行</button>
+            <button id="nl-save-monitor-btn" class="btn btn-ghost" type="button">保存为监控</button>
+            <button id="nl-open-compare-btn" class="btn btn-ghost" type="button">生成对比报告</button>
+          </div>
+        </article>
+
+        <article class="panel extract-main-panel">
+          <div class="section-heading">
+            <span>开始任务</span>
+            <small>默认全自动，也支持先分析再勾选字段</small>
+          </div>
+          <form id="extract-form">
+            <div class="field-group wide">
+              <label class="field-label" for="url">目标 URL</label>
+              <input id="url" type="url" placeholder="https://example.com/article" required>
+            </div>
+            <div class="form-grid">
+              <div class="field-group">
+                <label class="field-label" for="format">存储格式</label>
+                <select id="format">
+                  <option value="json">json</option>
+                  <option value="csv">csv</option>
+                  <option value="sqlite">sqlite</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="static-mode">抓取模式</label>
+                <select id="static-mode">
+                  <option value="false">动态抓取（Playwright）</option>
+                  <option value="true">静态抓取（HTTP）</option>
+                </select>
+              </div>
+              <div class="field-group field-group-hint">
+                <label class="field-label">当前策略</label>
+                <div class="mode-note">默认由 AI 自动选择字段。点击“分析页面”后，可按需手动勾选字段再提交任务。</div>
+              </div>
+            </div>
+
+            <article class="selection-panel" id="field-selector-panel">
+              <div class="selection-header">
+                <div>
+                  <strong id="detected-page-type">尚未分析页面</strong>
+                  <p id="field-selector-help">系统会在分析后展示候选字段，未勾选时默认走全自动模式。</p>
+                </div>
+                <button id="clear-fields-btn" class="btn btn-ghost" type="button">恢复全自动</button>
+              </div>
+              <div id="field-selector" class="field-chip-grid">
+                <span class="empty-chip">候选字段将在这里显示</span>
+              </div>
+              <div id="analysis-preview" class="preview-box preview-empty">分析预览将在这里显示</div>
+            </article>
+
+            <article class="selection-panel" id="monitor-config-panel">
+              <div class="section-heading compact">
+                <span>监控闭环配置</span>
+                <small>把抽取任务升级成可追踪、可通知的业务监控</small>
+              </div>
+              <div class="form-grid">
+                <div class="field-group">
+                  <label class="field-label" for="monitor-scenario-label">监控场景</label>
+                  <input id="monitor-scenario-label" type="text" placeholder="例如：电商价格监控、政策更新监控">
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="monitor-alert-focus">重点关注</label>
+                  <input id="monitor-alert-focus" type="text" placeholder="例如：价格、库存、发布时间">
+                </div>
+                <div class="field-group wide">
+                  <label class="field-label" for="monitor-business-goal">业务目标</label>
+                  <input id="monitor-business-goal" type="text" placeholder="例如：发现价格变化后立即同步给运营同学">
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="monitor-notify-on">通知规则</label>
+                  <select id="monitor-notify-on">
+                    <option value="changed,error">字段变化 + 失败</option>
+                    <option value="changed">仅字段变化</option>
+                    <option value="error">仅执行失败</option>
+                    <option value="stable,changed,error">所有结果都通知</option>
+                  </select>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="monitor-summary-style">输出风格</label>
+                  <select id="monitor-summary-style">
+                    <option value="brief">变化摘要版</option>
+                    <option value="report">领导汇报版</option>
+                    <option value="ops">运营执行版</option>
+                  </select>
+                </div>
+                <div class="field-group wide">
+                  <label class="field-label" for="monitor-webhook-url">Webhook 地址</label>
+                  <input id="monitor-webhook-url" type="url" placeholder="https://example.com/webhook">
+                </div>
+                <div class="field-group wide">
+                  <label class="field-label" for="monitor-notification-channels">多通道配置</label>
+                  <textarea id="monitor-notification-channels" rows="4" placeholder="每行一个通道：slack|运营群|https://hooks.slack.com/...&#10;teams|业务群|https://example.com/teams-hook&#10;webhook|备用回调|https://example.com/webhook|secret"></textarea>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="monitor-digest-enabled">Daily Digest</label>
+                  <label class="switch-field">
+                    <input id="monitor-digest-enabled" type="checkbox">
+                    <span>每天自动发送通知汇总</span>
+                  </label>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="monitor-digest-hour">Digest 时间</label>
+                  <select id="monitor-digest-hour">
+                    <option value="0">00:00</option>
+                    <option value="1">01:00</option>
+                    <option value="2">02:00</option>
+                    <option value="3">03:00</option>
+                    <option value="4">04:00</option>
+                    <option value="5">05:00</option>
+                    <option value="6">06:00</option>
+                    <option value="7">07:00</option>
+                    <option value="8">08:00</option>
+                    <option value="9" selected>09:00</option>
+                    <option value="10">10:00</option>
+                    <option value="11">11:00</option>
+                    <option value="12">12:00</option>
+                    <option value="13">13:00</option>
+                    <option value="14">14:00</option>
+                    <option value="15">15:00</option>
+                    <option value="16">16:00</option>
+                    <option value="17">17:00</option>
+                    <option value="18">18:00</option>
+                    <option value="19">19:00</option>
+                    <option value="20">20:00</option>
+                    <option value="21">21:00</option>
+                    <option value="22">22:00</option>
+                    <option value="23">23:00</option>
+                  </select>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="monitor-schedule-enabled">自动巡检</label>
+                  <label class="switch-field">
+                    <input id="monitor-schedule-enabled" type="checkbox" checked>
+                    <span>保存后按周期自动检查</span>
+                  </label>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="monitor-schedule-interval">巡检周期</label>
+                  <select id="monitor-schedule-interval">
+                    <option value="15">每 15 分钟</option>
+                    <option value="30">每 30 分钟</option>
+                    <option value="60" selected>每 1 小时</option>
+                    <option value="180">每 3 小时</option>
+                    <option value="360">每 6 小时</option>
+                    <option value="720">每 12 小时</option>
+                    <option value="1440">每天一次</option>
+                  </select>
+                </div>
+              </div>
+              <p class="panel-note">不填 Webhook 也可以先保存监控；填了之后，字段变化或失败时会自动尝试推送通知。多通道配置支持 `通道类型|名称|地址|密钥`，不需要密钥时最后一段可以留空。</p>
+            </article>
+
+            <div class="form-actions">
+              <button id="submit-btn" class="btn btn-primary" type="submit">提交任务</button>
+              <button id="analyze-page-btn" class="btn btn-soft" type="button">分析页面</button>
+              <button id="save-template-btn" class="btn btn-ghost" type="button">保存为模板</button>
+              <button id="save-monitor-btn" class="btn btn-ghost" type="button">加入监控</button>
+              <span id="submit-result" class="submit-result" style="display:none;"></span>
+            </div>
+            <section id="analyze-progress-panel" class="analyze-progress-panel" hidden aria-live="polite">
+              <div class="analyze-progress-header">
+                <strong id="analyze-progress-title">正在分析页面</strong>
+                <span id="analyze-progress-percent">0%</span>
+              </div>
+              <div class="analyze-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-labelledby="analyze-progress-title">
+                <div id="analyze-progress-bar" class="analyze-progress-bar"></div>
+              </div>
+              <p id="analyze-progress-text" class="analyze-progress-text">准备发起分析请求...</p>
+            </section>
+          </form>
+        </article>
+
+        <div>
+          <article class="panel extract-batch-panel">
+            <div class="section-heading">
+              <span>批量提交</span>
+              <small>按域名与路径自动整理 URL，让一批页面之间的联系更清晰</small>
+            </div>
+            <div class="batch-toolbar">
+              <button id="batch-append-current-btn" class="btn btn-ghost" type="button">加入当前 URL</button>
+              <button id="batch-load-watchlist-btn" class="btn btn-ghost" type="button">加入重复监控候选</button>
+              <button id="batch-normalize-btn" class="btn btn-ghost" type="button">去重并整理</button>
+            </div>
+            <label class="field-label" for="batch-urls">批量 URL 列表</label>
+            <textarea id="batch-urls" rows="8" placeholder="https://example.com/page-1&#10;https://example.com/page-2"></textarea>
+            <div id="batch-url-summary" class="batch-url-summary">输入 URL 后，这里会显示本次批量提交的有效数量、重复项和无效行。</div>
+            <section class="batch-relations-panel">
+              <div class="section-heading compact">
+                <span>批量关系预览</span>
+                <small>自动识别同域名、同路径栏目与建议提交顺序</small>
+              </div>
+              <div class="batch-relation-toolbar">
+                <label class="field-label inline-label" for="batch-domain-filter">域名筛选</label>
+                <select id="batch-domain-filter">
+                  <option value="all">全部域名</option>
+                </select>
+                <button id="batch-expand-all-btn" class="btn btn-ghost" type="button">展开全部</button>
+                <button id="batch-collapse-all-btn" class="btn btn-ghost" type="button">折叠全部</button>
+              </div>
+              <div class="batch-relation-metrics">
+                <div class="metric-chip">
+                  <span>域名分组</span>
+                  <strong id="batch-domain-count">0</strong>
+                </div>
+                <div class="metric-chip">
+                  <span>关联簇</span>
+                  <strong id="batch-cluster-count">0</strong>
+                </div>
+                <div class="metric-chip">
+                  <span>建议主线</span>
+                  <strong id="batch-primary-domain">-</strong>
+                </div>
+              </div>
+              <div id="batch-relation-summary" class="batch-relation-summary">输入多个 URL 后，这里会提示哪些链接属于同一站点、同一栏目，适合串联追踪。</div>
+              <div id="batch-relation-board" class="batch-relation-board"></div>
+            </section>
+            
+            <div class="form-actions">
+              <div class="batch-submit-mode">
+                <label><input type="radio" name="batch-submit-mode" value="new" checked> 新建批次</label>
+                <label><input type="radio" name="batch-submit-mode" value="continue"> 续接已有批次</label>
+              </div>
+              <select id="batch-group-select" class="batch-group-id-input" hidden>
+                <option value="">选择已有批次</option>
+              </select>
+              <button id="batch-btn" class="btn btn-secondary" type="button">提交批量任务</button>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="section-tasks" class="content-section section-hidden tasks-section">
+        <article class="panel tasks-panel">
+          <div class="section-heading">
+            <span>任务进展</span>
+            <small>默认显示最近 15 条</small>
+          </div>
+          <div class="tasks-toolbar">
+            <label class="field-label inline-label" for="task-batch-filter">按批次筛选</label>
+            <select id="task-batch-filter">
+              <option value="all">全部批次</option>
+            </select>
+          </div>
+          <div class="table-wrap tasks-table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>任务编号</th>
+                  <th>批次</th>
+                  <th>URL</th>
+                  <th>模式</th>
+                  <th>状态</th>
+                  <th>质量分</th>
+                  <th>耗时</th>
+                  <th>创建时间</th>
+                  <th>详情</th>
+                </tr>
+              </thead>
+              <tbody id="tasks-body"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="section-analyzer" class="content-section section-hidden analyzer-section">
+        <article class="panel analysis-hero-panel analyzer-hero-shell">
+          <div class="section-heading">
+            <span>URL 智能分析</span>
+            <small>自动提取网页内容，再结合用户填写的信息给出更贴近任务目标的分析结论</small>
+          </div>
+          <div class="analysis-mode-tabs" role="tablist" aria-label="分析模式选择">
+            <button id="insight-mode-single" class="mode-tab active" type="button" data-mode="single">单 URL 深度分析</button>
+            <button id="insight-mode-compare" class="mode-tab" type="button" data-mode="compare">多 URL 对比分析</button>
+          </div>
+          <div class="analysis-hero-grid">
+            <div class="analysis-hero-copy">
+              <strong>推荐流程：先抽内容，再补上下文，最后让 LLM 给结论。</strong>
+              <p>这个板块不会替代已有抽取任务，而是把 URL 内容理解、用户表单和结果建议组合成一个面向决策的分析流程。</p>
+            </div>
+            <div class="analysis-hero-pills">
+              <span>自动识别页面类型</span>
+              <span>用户目标表单</span>
+              <span>风险与建议</span>
+              <span>证据片段引用</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel analysis-input-shell">
+          <div class="section-heading">
+            <span>分析输入</span>
+            <small>先分析 URL，再根据你的目标生成更具体的输出</small>
+          </div>
+          <form id="insight-form">
+            <div id="insight-single-mode-panel" class="analysis-mode-panel">
+              <div class="form-grid insight-url-grid">
+                <div class="field-group wide">
+                  <label class="field-label" for="insight-url">目标 URL</label>
+                  <input id="insight-url" type="url" placeholder="https://example.com/product" required>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="insight-static-mode">抓取模式</label>
+                  <select id="insight-static-mode">
+                    <option value="false">动态抓取（Playwright）</option>
+                    <option value="true">静态抓取（HTTP）</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="analysis-workspace-grid">
+                <section class="selection-panel analysis-preview-panel">
+                  <div class="selection-header">
+                    <div>
+                      <strong id="insight-detected-page-type">尚未分析页面</strong>
+                      <p id="insight-page-help">点击“预分析 URL”后，系统会先识别页面类型并生成可供后续分析引用的页面摘要。</p>
+                    </div>
+                    <button id="insight-analyze-page-btn" class="btn btn-soft" type="button">预分析 URL</button>
+                  </div>
+                  <div id="insight-candidate-fields" class="field-chip-grid">
+                    <span class="empty-chip">候选字段将在这里显示</span>
+                  </div>
+                  <div id="insight-preview" class="preview-box preview-empty">页面预览将在这里显示</div>
+                </section>
+
+                <section class="selection-panel analysis-form-panel">
+                  <div class="section-heading compact">
+                    <span>补充信息表单</span>
+                    <small>只填写网页里没有、但会影响判断的上下文</small>
+                  </div>
+                  <div class="form-grid insight-form-grid">
+                    <div class="field-group">
+                      <label class="field-label" for="insight-goal">分析目标</label>
+                      <select id="insight-goal">
+                        <option value="summary">快速总结</option>
+                        <option value="decision">决策建议</option>
+                        <option value="risk">风险识别</option>
+                        <option value="comparison">竞品/备选比较</option>
+                        <option value="report">生成汇报结论</option>
+                      </select>
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="insight-role">你的身份</label>
+                      <select id="insight-role">
+                        <option value="consumer">消费者</option>
+                        <option value="operator">运营/产品</option>
+                        <option value="sales">销售/商务</option>
+                        <option value="researcher">研究/分析</option>
+                        <option value="candidate">求职者</option>
+                      </select>
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="insight-priority">最看重什么</label>
+                      <input id="insight-priority" type="text" placeholder="例如：价格、稳定性、品牌、远程办公">
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="insight-output-format">输出形式</label>
+                      <select id="insight-output-format">
+                        <option value="cards">结论卡片</option>
+                        <option value="table">对比表思路</option>
+                        <option value="brief">汇报摘要</option>
+                        <option value="actions">行动建议</option>
+                      </select>
+                    </div>
+                    <div class="field-group wide">
+                      <label class="field-label" for="insight-constraints">限制条件</label>
+                      <input id="insight-constraints" type="text" placeholder="例如：预算 3000 内、必须支持中文、仅接受一线城市远程">
+                    </div>
+                    <div class="field-group wide">
+                      <label class="field-label" for="insight-notes">补充说明</label>
+                      <textarea id="insight-notes" rows="4" placeholder="告诉系统你的背景、已有判断、正在比较的对象，或你最担心的点。"></textarea>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </div>
+
+            <div id="insight-compare-mode-panel" class="analysis-mode-panel section-hidden">
+              <div class="field-group wide">
+                <label class="field-label" for="compare-urls">对比 URL 列表</label>
+                <textarea id="compare-urls" rows="7" placeholder="https://example.com/product-a&#10;https://example.com/product-b&#10;https://example.com/product-c"></textarea>
+              </div>
+              <div class="form-grid compare-meta-grid">
+                <div class="field-group">
+                  <label class="field-label" for="compare-static-mode">抓取模式</label>
+                  <select id="compare-static-mode">
+                    <option value="false">动态抓取（Playwright）</option>
+                    <option value="true">静态抓取（HTTP）</option>
+                  </select>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="compare-focus">重点维度</label>
+                  <input id="compare-focus" type="text" placeholder="例如：价格、功能、售后、岗位匹配">
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="compare-output-format">输出形式</label>
+                  <select id="compare-output-format">
+                    <option value="table">对比表</option>
+                    <option value="brief">管理层摘要</option>
+                    <option value="actions">行动建议</option>
+                  </select>
+                </div>
+              </div>
+              <section class="selection-panel compare-preview-panel">
+                <div class="selection-header">
+                  <div>
+                    <strong id="compare-board-title">尚未生成对比预览</strong>
+                    <p id="compare-board-help">先整理多个 URL，系统会预读每个页面的类型和关键字段，再给出横向比较结果。</p>
+                  </div>
+                  <button id="compare-analyze-btn" class="btn btn-soft" type="button">预览对比对象</button>
+                </div>
+                <div id="compare-url-summary" class="batch-url-summary">输入多个 URL 后，这里会显示有效数量、重复项和无效行。</div>
+                <div id="compare-preview-board" class="compare-preview-board">
+                  <div class="relation-empty">还没有可预览的对比对象。</div>
+                </div>
+              </section>
+
+              <section class="selection-panel analysis-form-panel compare-form-panel">
+                <div class="section-heading compact">
+                  <span>比较上下文</span>
+                  <small>告诉系统你要如何判定胜出项、淘汰项和下一步动作</small>
+                </div>
+                <div class="form-grid insight-form-grid compare-form-grid">
+                  <div class="field-group">
+                    <label class="field-label" for="compare-goal">比较目标</label>
+                    <select id="compare-goal">
+                      <option value="comparison">找出最优方案</option>
+                      <option value="decision">帮助做最终决策</option>
+                      <option value="risk">识别关键风险差异</option>
+                      <option value="report">生成汇报版比较</option>
+                    </select>
+                  </div>
+                  <div class="field-group">
+                    <label class="field-label" for="compare-role">你的身份</label>
+                    <select id="compare-role">
+                      <option value="consumer">消费者</option>
+                      <option value="operator">运营/产品</option>
+                      <option value="sales">销售/商务</option>
+                      <option value="researcher">研究/分析</option>
+                      <option value="candidate">求职者</option>
+                    </select>
+                  </div>
+                  <div class="field-group">
+                    <label class="field-label" for="compare-must-have">必须满足</label>
+                    <input id="compare-must-have" type="text" placeholder="例如：预算内、支持中文、远程、可私有化部署">
+                  </div>
+                  <div class="field-group wide">
+                    <label class="field-label" for="compare-elimination">淘汰条件</label>
+                    <input id="compare-elimination" type="text" placeholder="例如：价格过高、功能不完整、缺少售后、岗位要求差距过大">
+                  </div>
+                  <div class="field-group wide">
+                    <label class="field-label" for="compare-notes">补充说明</label>
+                    <textarea id="compare-notes" rows="4" placeholder="告诉系统你为什么在比较这些 URL，当前倾向哪一个，或者你担心会忽略哪些因素。"></textarea>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <div class="form-actions analysis-main-actions">
+              <button id="insight-submit-btn" class="btn btn-primary" type="submit">生成分析</button>
+              <span id="insight-submit-result" class="submit-result" style="display:none;"></span>
+            </div>
+            <section id="insight-progress-panel" class="analyze-progress-panel" hidden aria-live="polite">
+              <div class="analyze-progress-header">
+                <strong id="insight-progress-title">正在生成分析</strong>
+                <span id="insight-progress-percent">0%</span>
+              </div>
+              <div class="analyze-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-labelledby="insight-progress-title">
+                <div id="insight-progress-bar" class="analyze-progress-bar"></div>
+              </div>
+              <p id="insight-progress-text" class="analyze-progress-text">准备读取页面与表单信息...</p>
+            </section>
+          </form>
+        </article>
+
+        <article id="insight-results-panel" class="panel insight-results-panel analysis-results-shell" hidden>
+          <div class="section-heading">
+            <span>分析结果</span>
+            <small>基于 URL 提取内容与用户补充信息联合生成</small>
+          </div>
+          <div class="analysis-result-toolbar">
+            <button id="insight-export-brief-btn" class="btn btn-soft" type="button">导出汇报文本</button>
+            <button id="insight-export-markdown-btn" class="btn btn-soft" type="button">导出 Markdown</button>
+            <button id="insight-export-csv-btn" class="btn btn-ghost" type="button">导出 CSV</button>
+            <button id="insight-export-json-btn" class="btn btn-ghost" type="button">导出 JSON</button>
+          </div>
+          <div class="insight-summary-grid">
+            <div class="metric-card emphasis-card">
+              <span class="metric-label">分析标题</span>
+              <strong class="metric-value metric-value-sm" id="insight-result-headline">-</strong>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">页面类型</span>
+              <strong class="metric-value metric-value-sm" id="insight-result-page-type">-</strong>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">分析信心</span>
+              <strong class="metric-value metric-value-sm" id="insight-result-confidence">-</strong>
+            </div>
+          </div>
+          <div class="insight-output-grid">
+            <section class="insight-result-card">
+              <h3>一句话结论</h3>
+              <p id="insight-result-summary" class="analysis-lead">-</p>
+            </section>
+            <section class="insight-result-card">
+              <h3>建议继续补充</h3>
+              <div id="insight-result-missing" class="insight-list compact-list"></div>
+            </section>
+            <section class="insight-result-card">
+              <h3>核心发现</h3>
+              <div id="insight-result-key-points" class="insight-list compact-list"></div>
+            </section>
+            <section class="insight-result-card">
+              <h3>风险/注意点</h3>
+              <div id="insight-result-risks" class="insight-list compact-list"></div>
+            </section>
+            <section class="insight-result-card">
+              <h3>下一步建议</h3>
+              <div id="insight-result-actions" class="insight-list compact-list"></div>
+            </section>
+            <section class="insight-result-card">
+              <h3>证据片段</h3>
+              <div id="insight-result-evidence" class="insight-list compact-list"></div>
+            </section>
+            <section id="compare-report-card" class="insight-result-card section-hidden">
+              <h3>差异对比报告</h3>
+              <div id="compare-report-content" class="insight-list compact-list"></div>
+            </section>
+            <section id="compare-result-card" class="insight-result-card section-hidden">
+              <h3>横向比较</h3>
+              <div id="compare-result-matrix" class="insight-list compact-list"></div>
+            </section>
+          </div>
+        </article>
+      </section>
+
+      <section id="section-assets" class="content-section section-hidden assets-section">
+        
+        <!-- 【被替换为任务模板市场】的资产大背景框 -->
+        <article class="panel assets-intro-panel assets-hero-shell extract-template-panel">
+          <div class="section-heading">
+            <span>任务模板市场</span>
+            <small>精选模板可直接安装或套用，你自己的模板也会沉淀在这里</small>
+          </div>
+          <div class="tasks-toolbar">
+            <label class="field-label inline-label" for="template-market-filter">模板分类</label>
+            <select id="template-market-filter">
+              <option value="all">全部</option>
+              <option value="monitor">监控</option>
+              <option value="extract">提取</option>
+              <option value="compare">对比</option>
+              <option value="batch">批量</option>
+            </select>
+          </div>
+          <div class="market-template-grid">
+            <section class="selection-panel market-template-panel">
+              <div class="section-heading compact">
+                <span>精选模板</span>
+                <small>像安装插件一样快速装配高频任务</small>
+              </div>
+              <div id="market-template-board" class="insight-list compact-list"></div>
+            </section>
+            <section class="selection-panel market-template-panel">
+              <div class="section-heading compact">
+                <span>我的模板</span>
+                <small>把你验证过的任务方案沉淀成自己的模板资产</small>
+              </div>
+              <div id="template-board" class="insight-list compact-list"></div>
+            </section>
+          </div>
+        </article>
+
+        <!-- 【被保留的】其余监控与资产面板 -->
+        <div class="insight-dual-grid assets-top-grid">
+          <article class="panel assets-watchlist-panel">
+            <div class="section-heading">
+              <span>监控候选清单</span>
+              <small>重复访问的页面最适合先做持续监控</small>
+            </div>
+            <div id="watchlist-board" class="insight-list compact-list"></div>
+          </article>
+
+          <article class="panel assets-memory-panel">
+            <div class="section-heading">
+              <span>站点记忆</span>
+              <small>把后台学习机制翻译成可见资产，让用户知道系统真的在记住常看的站点</small>
+            </div>
+            <div class="tasks-toolbar learned-profile-toolbar">
+              <label class="field-label inline-label" for="learned-profile-filter">记忆状态</label>
+              <select id="learned-profile-filter">
+                <option value="all">全部站点记忆</option>
+                <option value="active">仅可复用</option>
+                <option value="disabled">仅已停用</option>
+                <option value="risky">仅高风险</option>
+              </select>
+              <input id="learned-profile-search" class="learned-profile-search" type="search" placeholder="搜索域名、字段、路径前缀">
+              <button id="learned-profile-bulk-disable-btn" type="button" class="btn btn-ghost btn-inline">批量停用高风险</button>
+              <button id="learned-profile-bulk-relearn-btn" type="button" class="btn btn-soft btn-inline">批量重新学习</button>
+            </div>
+            <div id="learned-profile-summary" class="learned-profile-summary"></div>
+            <div id="learned-profile-board" class="insight-list compact-list"></div>
+          </article>
+        </div>
+
+        <article class="panel assets-notification-panel">
+          <div class="section-heading">
+            <span>通知中心</span>
+            <small>统一查看通知历史、待重试事件和人工补发入口</small>
+          </div>
+          <div class="notification-toolbar">
+            <div class="notification-toolbar-main">
+              <label class="field-label" for="notification-filter">通知状态</label>
+              <select id="notification-filter">
+                <option value="all">全部通知</option>
+                <option value="retry_pending">等待重试</option>
+                <option value="failed">发送失败</option>
+                <option value="sent">已发送</option>
+                <option value="skipped">已跳过</option>
+              </select>
+            </div>
+            <button id="notification-refresh-btn" class="btn btn-soft btn-inline" type="button">刷新通知</button>
+          </div>
+          <div class="notification-summary-grid">
+            <div class="metric-card">
+              <span class="metric-label">总通知数</span>
+              <strong id="notification-total" class="metric-value metric-value-sm">0</strong>
+            </div>
+            <div class="metric-card warning">
+              <span class="metric-label">等待重试</span>
+              <strong id="notification-retry-pending" class="metric-value metric-value-sm">0</strong>
+            </div>
+            <div class="metric-card danger">
+              <span class="metric-label">发送失败</span>
+              <strong id="notification-failed" class="metric-value metric-value-sm">0</strong>
+            </div>
+            <div class="metric-card success">
+              <span class="metric-label">已发送</span>
+              <strong id="notification-sent" class="metric-value metric-value-sm">0</strong>
+            </div>
+          </div>
+          <div id="notification-board" class="insight-list compact-list"></div>
+        </article>
+
+        <article class="panel assets-monitor-panel">
+          <div class="section-heading">
+            <span>监控中心</span>
+            <small>统一查看变化告警与已保存监控，并可直接触发检查</small>
+          </div>
+          <div class="monitor-center-grid">
+            <section class="selection-panel monitor-center-panel">
+              <div class="section-heading compact">
+                <span>告警概览</span>
+                <small>字段变化或执行失败会优先显示在这里</small>
+              </div>
+              <div id="monitor-alert-board" class="insight-list compact-list"></div>
+            </section>
+            <section class="selection-panel monitor-center-panel">
+              <div class="section-heading compact">
+                <span>已保存监控</span>
+                <small>支持手动立即检查，适合先验证价值再接自动调度</small>
+              </div>
+              <div id="monitor-board" class="insight-list compact-list"></div>
+            </section>
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <div id="learned-profile-drawer" class="detail-drawer" hidden>
+    <div class="detail-drawer-backdrop" data-close-learned-profile-drawer></div>
+    <section class="detail-drawer-panel" role="dialog" aria-modal="true" aria-labelledby="learned-profile-drawer-title">
+      <div class="detail-drawer-header">
+        <div>
+          <span class="brand-badge">SITE MEMORY</span>
+          <h3 id="learned-profile-drawer-title">站点记忆详情</h3>
+          <p id="learned-profile-drawer-subtitle" class="panel-note">查看最近命中任务、关联监控、稳定率和是否建议重新学习。</p>
+        </div>
+        <button class="btn btn-ghost btn-inline" type="button" data-close-learned-profile-drawer>关闭</button>
+      </div>
+      <div id="learned-profile-drawer-summary" class="learned-profile-summary"></div>
+      <section class="selection-panel monitor-center-panel">
+        <div class="section-heading compact">
+          <span>建议动作</span>
+          <small>根据稳定性、失败次数和完整度自动生成</small>
+        </div>
+        <div class="detail-action-row">
+          <button id="learned-profile-relearn-btn" class="btn btn-primary btn-inline" type="button">重新学习</button>
+          <button id="learned-profile-toggle-btn" class="btn btn-ghost btn-inline" type="button">停用/恢复</button>
+          <button id="learned-profile-reset-btn" class="btn btn-ghost btn-inline" type="button">重置统计</button>
+        </div>
+        <div id="learned-profile-action-list" class="insight-list compact-list"></div>
+      </section>
+      <div class="monitor-center-grid">
+        <section class="selection-panel monitor-center-panel">
+          <div class="section-heading compact">
+            <span>最近命中</span>
+            <small>按任务倒序查看这个档案最近被谁命中</small>
+          </div>
+          <div id="learned-profile-hit-list" class="insight-list compact-list"></div>
+        </section>
+        <section class="selection-panel monitor-center-panel">
+          <div class="section-heading compact">
+            <span>关联监控</span>
+            <small>哪些监控最近正在复用这条学习档案</small>
+          </div>
+          <div id="learned-profile-monitor-list" class="insight-list compact-list"></div>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <script id="initial-stats" type="application/json">{{ stats|tojson }}</script>
+  <script id="initial-tasks" type="application/json">{{ tasks|tojson }}</script>
+  <script id="initial-insights" type="application/json">{{ insights|tojson }}</script>
+  <script id="runtime-status" type="application/json">{{ runtime_status|tojson }}</script>
+  <script src="/static/ui_shared.js?v=20260417-1"></script>
+  <script src="/static/dashboard_analysis.js?v=20260417-1"></script>
+  <script src="/static/dashboard_templates_monitors.js?v=20260418-2"></script>
+  <script src="/static/dashboard_learned_profiles.js?v=20260423-1"></script>
+  <script src="/static/dashboard_task_runtime.js?v=20260418-2"></script>
+  <script src="/static/app.js?v=20260418-2"></script>
+</body>
+</html>

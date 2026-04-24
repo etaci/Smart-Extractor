@@ -1,0 +1,53 @@
+# 招聘信息提取 Schema 模板
+name: "JobPosting"
+description: "招聘岗位/求职信息的结构化提取模板"
+
+fields:
+  title:
+    type: str
+    description: "职位名称"
+    required: true
+  company:
+    type: str
+    description: "公司名称"
+    default: ""
+  location:
+    type: str
+    description: "工作地点"
+    default: ""
+  salary_range:
+    type: str
+    description: "薪资范围，如 15k-25k"
+    default: ""
+  job_type:
+    type: str
+    description: "工作类型（全职/兼职/实习）"
+    default: ""
+  experience_required:
+    type: str
+    description: "经验要求"
+    default: ""
+  education_required:
+    type: str
+    description: "学历要求"
+    default: ""
+  description:
+    type: str
+    description: "职位描述"
+    default: ""
+  requirements:
+    type: list[str]
+    description: "任职要求"
+    default: []
+  benefits:
+    type: list[str]
+    description: "福利待遇"
+    default: []
+  skills:
+    type: list[str]
+    description: "技能要求"
+    default: []
+  posted_date:
+    type: str
+    description: "发布日期"
+    default: ""
