@@ -268,4 +268,5 @@ docker compose run --rm extractor extract "https://example.com/article" --schema
 
 ## 免责声明
 
-本项目仅供个人使用，禁止用于进行恶意爬取等违法行为。若经发现则与本开发者无关。
+本项目按“现状”提供，不附带任何明示或暗示担保。
+使用者应自行确认其使用方式符合目标网站条款、当地法律法规以及数据合规要求。
