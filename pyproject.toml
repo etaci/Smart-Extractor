@@ -1,6 +1,33 @@
 [project]
 name = "smart-extractor"
 dynamic = ["version"]
+description = "基于 LLM 的复杂网页数据智能提取与变化监控系统"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "etaci" }
+]
+keywords = ["llm", "web scraping", "data extraction", "monitoring", "playwright", "fastapi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Framework :: FastAPI",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/etaci/Smart-Extractor"
+Repository = "https://github.com/etaci/Smart-Extractor"
+Issues = "https://github.com/etaci/Smart-Extractor/issues"
+
+
+[project]
+name = "smart-extractor"
+dynamic = ["version"]
 description = "自学习网页变化监控与决策辅助系统"
 readme = "README.md"
 requires-python = ">=3.12"
