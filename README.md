@@ -38,7 +38,7 @@
 
 - Python `>= 3.12`
 - [uv](https://docs.astral.sh/uv/)
-- 首次使用动态抓取时需要安装 Playwright 浏览器
+- 首次使用动态抓取时需要安装现代浏览器（chrome、edge等）
 
 ### 1. 安装依赖
 
