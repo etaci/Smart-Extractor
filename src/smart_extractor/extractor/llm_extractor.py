@@ -25,6 +25,7 @@ from smart_extractor.extractor.llm_fallbacks import (
     normalize_compare_report,
     resolve_fallback_profile,
 )
+from smart_extractor.extractor.learned_profile_store import LearnedProfile
 from smart_extractor.extractor.llm_prompts import (
     AUTO_ANALYZE_PROMPT_TEMPLATE,
     COMPARE_ANALYZE_PROMPT_TEMPLATE,
@@ -44,8 +45,9 @@ from smart_extractor.extractor.llm_response import (
     _safe_json_loads,
 )
 from smart_extractor.extractor.llm_task_plan import normalize_task_plan_payload
+from smart_extractor.extractor.rule_extractor import RuleBasedDynamicExtractor
 from smart_extractor.models.base import BaseExtractModel, DynamicExtractResult
-from smart_extractor.utils.display import get_field_label
+from smart_extractor.utils.display import build_field_labels, get_field_label
 
 _TIKTOKEN_ENCODING = None
 _TIKTOKEN_LOADED = False
@@ -71,6 +73,7 @@ class LLMExtractor(BaseExtractor):
         self._config = config or LLMConfig()
 
         self._client = LLMClient(self._config)
+        self._rule_extractor = RuleBasedDynamicExtractor()
 
     def extract(
         self,
@@ -93,6 +96,16 @@ class LLMExtractor(BaseExtractor):
             for field in (selected_fields or [])
             if field and field.strip()
         ]
+
+        precheck_result = self._run_rule_precheck(
+            text=text,
+            source_url=source_url,
+            selected_fields=normalized_fields,
+        )
+        if precheck_result is not None:
+            logger.info("规则预检命中，跳过 LLM 调用: {}", source_url)
+            return precheck_result
+
         fields_hint = (
             ", ".join(normalized_fields)
             if normalized_fields
@@ -372,6 +385,105 @@ class LLMExtractor(BaseExtractor):
             source_url=source_url,
             selected_fields=selected_fields,
         )
+
+    def _run_rule_precheck(
+        self,
+        *,
+        text: str,
+        source_url: str,
+        selected_fields: list[str],
+    ) -> DynamicExtractResult | None:
+        if not self._config.rule_precheck_enabled:
+            return None
+
+        page_type, fallback_fields = resolve_fallback_profile(text, selected_fields)
+        if not self._should_try_rule_precheck(
+            page_type=page_type,
+            selected_fields=selected_fields,
+        ):
+            return None
+
+        effective_fields = selected_fields or fallback_fields
+        profile = LearnedProfile(
+            profile_id="rule-precheck",
+            domain="",
+            path_prefix="/",
+            page_type=page_type,
+            selected_fields=effective_fields,
+            field_labels=build_field_labels(effective_fields),
+            sample_url=source_url,
+        )
+        result = self._rule_extractor.extract(
+            text,
+            source_url=source_url,
+            profile=profile,
+            selected_fields=effective_fields,
+        )
+        if not self._is_high_confidence_rule_result(result, page_type=page_type):
+            return None
+
+        result.extraction_strategy = "rule_precheck"
+        result.strategy_details = {
+            **(result.strategy_details if isinstance(result.strategy_details, dict) else {}),
+            "mode": "rule_precheck",
+            "source_url": source_url,
+        }
+        return result
+
+    @staticmethod
+    def _should_try_rule_precheck(
+        *,
+        page_type: str,
+        selected_fields: list[str],
+    ) -> bool:
+        if page_type in {"product", "job"}:
+            return True
+
+        if not selected_fields:
+            return False
+
+        structured_fields = {
+            "title",
+            "name",
+            "price",
+            "brand",
+            "company",
+            "location",
+            "publish_date",
+            "author",
+            "salary_range",
+            "stock",
+        }
+        requested = set(selected_fields)
+        return requested.issubset(structured_fields)
+
+    def _is_high_confidence_rule_result(
+        self,
+        result: DynamicExtractResult,
+        *,
+        page_type: str,
+    ) -> bool:
+        fields = result.selected_fields or result.candidate_fields
+        if not fields:
+            return False
+
+        filled_fields = [
+            field for field in fields if result.data.get(field) not in (None, "", [], {})
+        ]
+        if len(filled_fields) < max(1, int(self._config.rule_precheck_min_fields)):
+            return False
+
+        completeness = result.completeness_score()
+        if completeness < float(self._config.rule_precheck_min_completeness):
+            return False
+
+        values = result.data
+        if page_type == "product":
+            has_name = values.get("name") or values.get("title")
+            return bool(has_name and values.get("price"))
+        if page_type == "job":
+            return bool(values.get("title") and values.get("company"))
+        return True
 
     @staticmethod
     def _resolve_fallback_profile(

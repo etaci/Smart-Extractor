@@ -6,6 +6,9 @@ llm:
   max_tokens: 4096
   max_retries: 3
   timeout: 60
+  rule_precheck_enabled: true
+  rule_precheck_min_completeness: 0.85
+  rule_precheck_min_fields: 2
 fetcher:
   headless: true
   timeout: 30000
@@ -18,6 +21,8 @@ fetcher:
   screenshot: false
   storage_state_path: output/playwright/state.json
   persistent_context_dir: output/playwright/profile
+  challenge_retry_attempts: 2
+  challenge_retry_backoff_ms: 1500
 cleaner:
   remove_tags:
   - script

@@ -230,6 +230,31 @@ class TestPipelineWithMock:
         assert "安全验证" in result.error
         pipeline.close()
 
+    def test_pipeline_detects_common_challenge_page_markers(self, test_config):
+        mock_fetcher = MagicMock()
+        mock_fetcher.fetch.return_value = FetchResult(
+            url="https://example.com",
+            html=(
+                "<html><body>"
+                "<h1>Just a moment...</h1>"
+                "<p>Please enable JavaScript and cookies to continue. Ray ID 123456.</p>"
+                "</body></html>"
+            ),
+            status_code=200,
+        )
+        mock_fetcher.close.return_value = None
+
+        pipeline = ExtractionPipeline(config=test_config, fetcher=mock_fetcher)
+        result = pipeline.run(
+            url="https://example.com",
+            schema_name="auto",
+            skip_storage=True,
+        )
+
+        assert result.success is False
+        assert "真实内容" in result.error
+        pipeline.close()
+
     def test_pipeline_fails_on_shell_page(self, test_config):
         mock_fetcher = MagicMock()
         mock_fetcher.fetch.return_value = FetchResult(
@@ -464,4 +489,35 @@ class TestPipelineWithMock:
         assert result.success is True
         pipeline._rule_extractor.extract.assert_not_called()
         assert mock_extractor_instance.extract_dynamic.call_count == 1
+        pipeline.close()
+
+    @patch("smart_extractor.pipeline.LLMExtractor")
+    def test_pipeline_does_not_persist_learned_profile_for_fallback_result(
+        self, MockExtractor, test_config
+    ):
+        mock_extractor_instance = MagicMock()
+        mock_extractor_instance.extract_dynamic.return_value = DynamicExtractResult(
+            page_type="article",
+            candidate_fields=["content"],
+            selected_fields=["content"],
+            field_labels={"content": "正文"},
+            data={"content": "只是兜底出来的一段文本"},
+            formatted_text="正文：只是兜底出来的一段文本",
+            extraction_strategy="fallback",
+        )
+        MockExtractor.return_value = mock_extractor_instance
+
+        pipeline, _ = self._create_mock_pipeline(test_config)
+        pipeline._extractor = mock_extractor_instance
+        pipeline._learned_profile_store = MagicMock()
+        pipeline._learned_profile_store.find_best_match.return_value = None
+
+        result = pipeline.run(
+            url="https://example.com/article/1",
+            schema_name="auto",
+            skip_storage=True,
+        )
+
+        assert result.success is True
+        pipeline._learned_profile_store.upsert_from_result.assert_not_called()
         pipeline.close()

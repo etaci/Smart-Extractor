@@ -101,6 +101,15 @@ class LLMConfig(BaseSettings):
     max_tokens: int = Field(default=4096, description="最大输出 token 数")
     max_retries: int = Field(default=3, description="API 最大重试次数")
     timeout: int = Field(default=60, description="API 超时时间，单位秒")
+    rule_precheck_enabled: bool = Field(
+        default=True, description="是否在 LLM 之前先尝试低成本规则抽取"
+    )
+    rule_precheck_min_completeness: float = Field(
+        default=0.85, description="规则预检命中 LLM 前的最低完整度"
+    )
+    rule_precheck_min_fields: int = Field(
+        default=2, description="规则预检认为可用时的最少非空字段数"
+    )
 
 
 class FetcherConfig(BaseSettings):
@@ -122,6 +131,12 @@ class FetcherConfig(BaseSettings):
     )
     persistent_context_dir: Optional[str] = Field(
         default=None, description="Playwright 持久化浏览器 Profile 目录"
+    )
+    challenge_retry_attempts: int = Field(
+        default=2, description="遇到反爬/挑战页时的额外尝试次数"
+    )
+    challenge_retry_backoff_ms: int = Field(
+        default=1500, description="反爬/挑战页再次尝试前的等待时间，毫秒"
     )
 
 

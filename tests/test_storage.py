@@ -4,7 +4,9 @@
 测试 JSON / CSV / SQLite 三种存储器的写入、读取、统计功能。
 """
 
+import csv
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List
 
@@ -23,6 +25,10 @@ class StorageTestModel(BaseExtractModel):
     title: str = Field(default="", description="标题")
     score: float = Field(default=0.0, description="评分")
     tags: List[str] = Field(default_factory=list, description="标签")
+
+
+class StorageExtendedTestModel(StorageTestModel):
+    category: str = Field(default="", description="分类")
 
 
 def _make_config(tmp_path) -> StorageConfig:
@@ -103,6 +109,22 @@ class TestJSONStorage:
         assert path.parent == Path(tmp_path)
         assert path.name == "unsafe_name.json"
 
+    def test_concurrent_saves_preserve_all_rows(self, tmp_path):
+        storage = JSONStorage(_make_config(tmp_path))
+
+        def _save(index: int):
+            storage.save(
+                StorageTestModel(title=f"json-{index}", score=float(index)),
+                collection_name="test_concurrent_json",
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(_save, range(20)))
+
+        loaded = storage.load(collection_name="test_concurrent_json", limit=100)
+        assert len(loaded) == 20
+        assert len({item["title"] for item in loaded}) == 20
+
 
 # ===== CSV Storage 测试 =====
 
@@ -153,6 +175,48 @@ class TestCSVStorage:
         path = Path(storage.save(_make_sample_data(), collection_name="..\\unsafe/name"))
         assert path.parent == Path(tmp_path)
         assert path.name == "unsafe_name.csv"
+
+    def test_concurrent_appends_keep_all_rows(self, tmp_path):
+        storage = CSVStorage(_make_config(tmp_path))
+
+        def _save(index: int):
+            storage.save(
+                StorageTestModel(title=f"csv-{index}", score=float(index)),
+                collection_name="test_concurrent_csv",
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(_save, range(20)))
+
+        assert storage.count(collection_name="test_concurrent_csv") == 20
+
+    def test_schema_evolution_rewrites_header_without_dropping_fields(self, tmp_path):
+        storage = CSVStorage(_make_config(tmp_path))
+        storage.save(
+            StorageTestModel(title="first", score=1.0, tags=["a"]),
+            collection_name="test_csv_schema_evolution",
+        )
+        storage.save(
+            StorageExtendedTestModel(
+                title="second",
+                score=2.0,
+                tags=["b"],
+                category="news",
+            ),
+            collection_name="test_csv_schema_evolution",
+        )
+
+        csv_path = Path(tmp_path) / "test_csv_schema_evolution.csv"
+        with open(csv_path, "r", encoding=storage._config.csv_encoding, newline="") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            assert reader.fieldnames == ["title", "score", "tags", "category"]
+
+        assert len(rows) == 2
+        assert rows[0]["title"] == "first"
+        assert rows[0]["category"] == ""
+        assert rows[1]["title"] == "second"
+        assert rows[1]["category"] == "news"
 
 
 # ===== SQLite Storage 测试 =====
@@ -236,4 +300,19 @@ class TestSQLiteStorage:
         loaded = storage.load(collection_name='unsafe"]; DROP TABLE test; --')
         assert len(loaded) == 1
         assert storage.count(collection_name='unsafe"]; DROP TABLE test; --') == 1
+        storage.close()
+
+    def test_concurrent_saves_are_thread_safe(self, tmp_path):
+        storage = SQLiteStorage(_make_config(tmp_path))
+
+        def _save(index: int):
+            storage.save(
+                StorageTestModel(title=f"sqlite-{index}", score=float(index)),
+                collection_name="test_concurrent_sqlite",
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(_save, range(20)))
+
+        assert storage.count(collection_name="test_concurrent_sqlite") == 20
         storage.close()

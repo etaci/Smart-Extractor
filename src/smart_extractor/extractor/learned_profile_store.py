@@ -182,7 +182,11 @@ class LearnedProfileStore:
             }
             matched.sample_url = source_url or matched.sample_url
             matched.last_matched_url = source_url or matched.last_matched_url
-            matched.llm_success_count += 1
+            normalized_strategy = str(strategy or "").strip().lower()
+            if normalized_strategy.startswith("llm"):
+                matched.llm_success_count += 1
+            elif normalized_strategy.startswith("rule"):
+                matched.rule_success_count += 1
             matched.last_strategy = strategy
             matched.last_completeness = float(completeness or 0.0)
             matched.last_used_at = now

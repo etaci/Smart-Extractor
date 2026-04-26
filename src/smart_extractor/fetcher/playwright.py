@@ -14,7 +14,12 @@ from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_
 
 from smart_extractor.config import FetcherConfig
 from smart_extractor.fetcher.base import BaseFetcher, FetchResult
-from smart_extractor.utils.anti_detect import get_random_user_agent
+from smart_extractor.utils.anti_detect import (
+    get_random_user_agent,
+    headers_indicate_challenge,
+    looks_like_challenge_text,
+    looks_like_loading_text,
+)
 
 
 _DEFAULT_HEADERS = {
@@ -23,7 +28,6 @@ _DEFAULT_HEADERS = {
     "Cache-Control": "max-age=0",
 }
 
-_LOADING_MARKERS = ("加载中", "请稍候", "loading")
 _SHELL_TEXT_MAX_LENGTH = 40
 
 _ANTI_DETECT_SCRIPT = """
@@ -150,14 +154,37 @@ class PlaywrightFetcher(BaseFetcher):
             logger.debug("读取 body 文本失败，按空字符串处理: {}", exc)
             return ""
 
+    @staticmethod
+    def _extract_title_text(page: Page) -> str:
+        try:
+            return page.title().strip()
+        except Exception as exc:
+            logger.debug("读取页面标题失败，按空字符串处理: {}", exc)
+            return ""
+
     def _looks_like_shell_page(self, page: Page) -> bool:
         body_text = self._extract_body_text(page)
         if not body_text:
             return True
 
-        lowered = body_text.lower()
-        has_loading_marker = any(marker.lower() in lowered for marker in _LOADING_MARKERS)
-        return len(body_text) <= _SHELL_TEXT_MAX_LENGTH and has_loading_marker
+        return looks_like_loading_text(body_text, max_length=_SHELL_TEXT_MAX_LENGTH)
+
+    def _looks_like_challenge_page(
+        self,
+        page: Page,
+        *,
+        status_code: int = 0,
+        headers: dict[str, str] | None = None,
+    ) -> bool:
+        title_text = self._extract_title_text(page)
+        body_text = self._extract_body_text(page)
+        combined_text = "\n".join(part for part in (title_text, body_text) if part)
+
+        if looks_like_challenge_text(combined_text):
+            return True
+        if headers_indicate_challenge(headers):
+            return True
+        return status_code in {401, 403, 429} and len(body_text) <= 400
 
     @staticmethod
     def _warm_up_page(page: Page) -> None:
@@ -189,26 +216,37 @@ class PlaywrightFetcher(BaseFetcher):
 
         while time.time() < deadline:
             body_text = self._extract_body_text(page)
-            lowered = body_text.lower()
-            has_loading_marker = any(marker.lower() in lowered for marker in _LOADING_MARKERS)
-            if len(body_text) >= 80 and not has_loading_marker:
+            if len(body_text) >= 80 and not looks_like_loading_text(body_text):
                 return
 
             page.wait_for_timeout(500)
 
-    def _stabilize_page(self, page: Page, url: str) -> None:
-        max_attempts = 2
+    def _stabilize_page(
+        self,
+        page: Page,
+        url: str,
+        *,
+        status_code: int = 0,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        max_attempts = max(1, int(self._config.challenge_retry_attempts))
         for attempt in range(1, max_attempts + 1):
             self._wait_for_meaningful_content(page)
-            if not self._looks_like_shell_page(page):
+            if not self._looks_like_shell_page(page) and not self._looks_like_challenge_page(
+                page,
+                status_code=status_code,
+                headers=headers,
+            ):
                 return
 
             if attempt >= max_attempts:
-                logger.warning("页面仍处于壳页状态: {}", url)
+                logger.warning("页面仍处于壳页或挑战页状态: {}", url)
                 return
 
-            logger.info("检测到页面仍为壳页，执行预热并重试: {} attempt={}", url, attempt + 1)
+            logger.info("检测到页面仍为壳页或挑战页，执行预热并重试: {} attempt={}", url, attempt + 1)
             self._warm_up_page(page)
+            if self._config.challenge_retry_backoff_ms > 0:
+                page.wait_for_timeout(self._config.challenge_retry_backoff_ms)
             page.reload(timeout=self._config.timeout, wait_until="domcontentloaded")
             try:
                 page.wait_for_load_state("networkidle", timeout=min(self._config.timeout, 5000))
@@ -228,13 +266,15 @@ class PlaywrightFetcher(BaseFetcher):
                 timeout=self._config.timeout,
                 wait_until="domcontentloaded",
             )
+            status_code = response.status if response else 0
+            headers = dict(response.headers) if response else {}
 
             try:
                 page.wait_for_load_state("networkidle", timeout=min(self._config.timeout, 5000))
             except Exception:
                 logger.debug("等待 networkidle 超时，继续处理")
 
-            self._stabilize_page(page, url)
+            self._stabilize_page(page, url, status_code=status_code, headers=headers)
 
             if self._config.wait_after_load > 0:
                 page.wait_for_timeout(self._config.wait_after_load)
@@ -244,9 +284,11 @@ class PlaywrightFetcher(BaseFetcher):
             except Exception:
                 logger.debug("等待 body 超时，继续处理")
 
-            status_code = response.status if response else 0
-            headers = dict(response.headers) if response else {}
-            is_shell_page = self._looks_like_shell_page(page)
+            is_shell_page = self._looks_like_shell_page(page) or self._looks_like_challenge_page(
+                page,
+                status_code=status_code,
+                headers=headers,
+            )
 
             if self._config.screenshot:
                 self._save_screenshot(page, url)

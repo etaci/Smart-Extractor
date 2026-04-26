@@ -238,7 +238,7 @@ def test_playwright_fetcher_marks_shell_page_in_fetch_result():
 
     fetcher = PlaywrightFetcher(FetcherConfig(timeout=5000, wait_after_load=0))
     fetcher._create_page = lambda: FetchPage()
-    fetcher._stabilize_page = lambda page, url: None
+    fetcher._stabilize_page = lambda page, url, **kwargs: None
 
     result = fetcher.fetch("https://example.com")
 

@@ -129,6 +129,41 @@ def test_build_task_plan_fallback_parses_compare_request():
     assert "price" in payload["selected_fields"]
 
 
+def test_extract_dynamic_uses_rule_precheck_for_high_confidence_structured_page(monkeypatch):
+    extractor = LLMExtractor(
+        LLMConfig(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test-model",
+            timeout=5,
+            rule_precheck_enabled=True,
+        )
+    )
+    called = {"count": 0}
+
+    def _never_call_llm(**_kwargs):
+        called["count"] += 1
+        return {}
+
+    monkeypatch.setattr(extractor, "_call_json_llm", _never_call_llm)
+
+    result = extractor.extract_dynamic(
+        text=(
+            "商品名称：Smart Extractor Pro\n"
+            "价格：1999\n"
+            "品牌：OpenAI Tools\n"
+            "库存：现货\n"
+        ),
+        source_url="https://example.com/products/1",
+        selected_fields=["name", "price", "brand"],
+    )
+
+    assert called["count"] == 0
+    assert result.extraction_strategy == "rule_precheck"
+    assert result.data["name"] == "Smart Extractor Pro"
+    assert result.data["price"] == "1999"
+
+
 def test_extract_dynamic_fallback_uses_rule_fields_when_llm_unavailable(monkeypatch):
     extractor = LLMExtractor(
         LLMConfig(
@@ -136,6 +171,7 @@ def test_extract_dynamic_fallback_uses_rule_fields_when_llm_unavailable(monkeypa
             base_url="https://example.com/v1",
             model="test-model",
             timeout=5,
+            rule_precheck_enabled=False,
         )
     )
     monkeypatch.setattr(

@@ -14,7 +14,7 @@ from smart_extractor.utils.display import get_field_label
 
 _FIELD_ALIASES: dict[str, list[str]] = {
     "title": ["标题", "主题", "标题名称", "title"],
-    "name": ["名称", "商品名", "产品名", "name"],
+    "name": ["名称", "商品名称", "商品名", "产品名称", "产品名", "name"],
     "price": ["价格", "售价", "到手价", "price"],
     "brand": ["品牌", "brand"],
     "company": ["公司", "企业", "招聘方", "company"],
@@ -33,10 +33,10 @@ _DATE_RE = re.compile(
     r"(20\d{2}[-/年]\d{1,2}[-/月]\d{1,2}(?:日)?(?:\s+\d{1,2}:\d{1,2}(?::\d{1,2})?)?)"
 )
 _PRICE_RE = re.compile(
-    r"((?:¥|￥|\$)?\s?\d{1,6}(?:[.,]\d{1,2})?\s*(?:元|美元|USD|usd|CNY|RMB)?(?:\s*[-~至到]\s*(?:¥|￥|\$)?\s?\d{1,6}(?:[.,]\d{1,2})?\s*(?:元|/月|/年|美元|USD)?)?)"
+    r"((?:¥|\$|￥)?\s?\d{1,6}(?:[.,]\d{1,2})?\s*(?:元|美元|USD|usd|CNY|RMB)?(?:\s*[-~至到]\s*(?:¥|\$|￥)?\s?\d{1,6}(?:[.,]\d{1,2})?\s*(?:元|/月|/年|美元|USD)?)?)"
 )
 _SALARY_RE = re.compile(
-    r"((?:\d{1,2}(?:\.\d+)?[kKwW万千]?[\-/~至到]\d{1,2}(?:\.\d+)?[kKwW万千]?|(?:¥|￥)?\d{1,6}(?:[.,]\d{1,2})?\s*[-~至到]\s*(?:¥|￥)?\d{1,6}(?:[.,]\d{1,2})?)(?:\s*/\s*(?:月|年))?)"
+    r"((?:\d{1,2}(?:\.\d+)?[kKwW万千]?[\-/~至到]\d{1,2}(?:\.\d+)?[kKwW万千]?|(?:¥|\$|￥)?\s?\d{1,6}(?:[.,]\d{1,2})?\s*[-~至到]\s*(?:¥|\$|￥)?\s?\d{1,6}(?:[.,]\d{1,2})?)(?:\s*/\s*(?:月|年))?)"
 )
 
 
@@ -51,6 +51,11 @@ def _split_lines(text: str) -> list[str]:
         if item:
             lines.append(item)
     return lines
+
+
+def _looks_like_labeled_line(text: str) -> bool:
+    normalized = str(text or "")
+    return bool(re.match(r"^[^:：]{1,20}\s*[:：]\s*\S+", normalized))
 
 
 class RuleBasedDynamicExtractor:
@@ -69,16 +74,16 @@ class RuleBasedDynamicExtractor:
         normalized_fields = [field for field in fields if str(field or "").strip()]
         data: dict[str, Any] = {}
 
-        title_like = self._pick_title(lines)
-        if title_like and "title" in normalized_fields:
-            data["title"] = title_like
-        if title_like and "name" in normalized_fields:
-            data.setdefault("name", title_like)
-
         for field in normalized_fields:
-            value = data.get(field) or self._extract_field(field, lines, text)
+            value = self._extract_field(field, lines, text)
             if value not in (None, "", [], {}):
                 data[field] = value
+
+        title_like = self._pick_title(lines)
+        if title_like and "title" in normalized_fields and not data.get("title"):
+            data["title"] = title_like
+        if title_like and "name" in normalized_fields and not data.get("name"):
+            data["name"] = title_like
 
         if "description" in normalized_fields and not data.get("description"):
             data["description"] = self._pick_description(lines, title_like)
@@ -179,6 +184,8 @@ class RuleBasedDynamicExtractor:
     @staticmethod
     def _pick_title(lines: list[str]) -> str:
         for line in lines[:8]:
+            if _looks_like_labeled_line(line):
+                continue
             if 4 <= len(line) <= 80:
                 return line
         return lines[0] if lines else ""
@@ -186,7 +193,7 @@ class RuleBasedDynamicExtractor:
     @staticmethod
     def _pick_description(lines: list[str], title_like: str) -> str:
         for line in lines:
-            if line == title_like:
+            if line == title_like or _looks_like_labeled_line(line):
                 continue
             if len(line) >= 18:
                 return line[:240]
@@ -194,7 +201,11 @@ class RuleBasedDynamicExtractor:
 
     @staticmethod
     def _pick_content(lines: list[str], title_like: str) -> str:
-        paragraphs = [line for line in lines if line != title_like and len(line) >= 16]
+        paragraphs = [
+            line
+            for line in lines
+            if line != title_like and len(line) >= 16 and not _looks_like_labeled_line(line)
+        ]
         if not paragraphs:
             return ""
         return "\n".join(paragraphs[:6])[:1200]
@@ -226,7 +237,9 @@ class RuleBasedDynamicExtractor:
     def _extract_location(lines: list[str]) -> str:
         for line in lines:
             matched = re.search(
-                r"(?:地点|城市|工作地点|location)\s*[:：]\s*(.+)$", line, re.IGNORECASE
+                r"(?:地点|城市|工作地点|location)\s*[:：]\s*(.+)$",
+                line,
+                re.IGNORECASE,
             )
             if matched:
                 return _clean_line(matched.group(1))
@@ -244,7 +257,9 @@ class RuleBasedDynamicExtractor:
     def _extract_company(lines: list[str]) -> str:
         for line in lines:
             matched = re.search(
-                r"(?:公司|企业|招聘方|company)\s*[:：]\s*(.+)$", line, re.IGNORECASE
+                r"(?:公司|企业|招聘方|company)\s*[:：]\s*(.+)$",
+                line,
+                re.IGNORECASE,
             )
             if matched:
                 return _clean_line(matched.group(1))

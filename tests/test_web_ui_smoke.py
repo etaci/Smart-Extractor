@@ -61,9 +61,11 @@ def _dashboard():
         },
         "templates": [{"template_id": "tpl-1", "name": "Tpl", "url": "https://example.com/tpl", "page_type": "article", "storage_format": "json", "use_static": False, "selected_fields": ["title"], "field_labels": {"title": "Title"}, "profile": {"scenario_label": "Scenario", "business_goal": "Goal", "summary_style": "report"}}],
         "market_templates": [
+            {"template_id": "market-product-monitor", "name": "Product", "description": "desc", "category": "monitor", "page_type": "product", "sample_url": "https://example.com/product", "storage_format": "json", "use_static": False, "selected_fields": ["price"], "field_labels": {"price": "Price"}, "tags": ["product"], "target_users": ["ops"], "default_outputs": ["brief"], "profile": {"scenario_label": "Scenario", "business_goal": "Goal", "summary_style": "report", "alert_focus": "price", "notify_on": ["changed"]}},
             {"template_id": "market-policy-watch", "name": "Policy", "description": "desc", "category": "monitor", "page_type": "article", "sample_url": "https://example.com/policy", "storage_format": "json", "use_static": False, "selected_fields": ["title"], "field_labels": {"title": "Title"}, "tags": ["policy"], "target_users": ["ops"], "default_outputs": ["brief"], "profile": {"scenario_label": "Scenario", "business_goal": "Goal", "summary_style": "report", "alert_focus": "title", "notify_on": ["changed"]}},
             {"template_id": "market-job-compare", "name": "Compare", "description": "desc", "category": "compare", "page_type": "job", "sample_url": "https://example.com/job", "storage_format": "json", "use_static": True, "selected_fields": ["salary"], "field_labels": {"salary": "Salary"}, "tags": ["job"], "target_users": ["ops"], "default_outputs": ["brief"], "profile": {"scenario_label": "Scenario", "business_goal": "Goal", "summary_style": "report", "alert_focus": "salary", "notify_on": ["changed"]}},
             {"template_id": "market-batch-article", "name": "Batch", "description": "desc", "category": "batch", "page_type": "article", "sample_url": "https://example.com/article", "storage_format": "csv", "use_static": True, "selected_fields": ["title"], "field_labels": {"title": "Title"}, "tags": ["batch"], "target_users": ["ops"], "default_outputs": ["brief"], "profile": {"scenario_label": "Scenario", "business_goal": "Goal", "summary_style": "report", "alert_focus": "title", "notify_on": ["changed"]}},
+            {"template_id": "market-competitor-watch", "name": "Competitor", "description": "desc", "category": "monitor", "page_type": "product", "sample_url": "https://example.com/competitor", "storage_format": "json", "use_static": False, "selected_fields": ["title", "summary"], "field_labels": {"title": "Title", "summary": "Summary"}, "tags": ["competitor"], "target_users": ["ops"], "default_outputs": ["brief"], "profile": {"scenario_label": "Scenario", "business_goal": "Goal", "summary_style": "report", "alert_focus": "title", "notify_on": ["changed"]}},
         ],
         "monitors": [
             {"monitor_id": "mon-1", "name": "Monitor 1", "url": "https://example.com/p1", "profile": {"scenario_label": "S1", "business_goal": "G1", "alert_focus": "price"}, "business_summary": "Summary", "last_extraction_strategy": "rule", "last_notification_status": "sent", "notification_status_label": "Sent", "alert_label": "Changed", "last_alert_level": "changed", "severity": "high", "severity_label": "High", "schedule_enabled": True, "schedule_status": "active", "schedule_status_label": "Active", "schedule_interval_label": "60m", "last_trigger_source_label": "Manual"},
@@ -217,6 +219,36 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         _mock_api(page, calls)
 
         page.goto(web_ui_base_url, wait_until="networkidle")
+        page.click(".hero-actions [data-open-section='extract']")
+        page.wait_for_function(
+            "() => !document.getElementById('section-extract').classList.contains('section-hidden')"
+        )
+        page.click(".nav-item[data-section='overview']")
+        page.click(".hero-actions [data-open-section='analyzer']")
+        page.wait_for_function(
+            "() => !document.getElementById('section-analyzer').classList.contains('section-hidden')"
+        )
+        page.click(".nav-item[data-section='overview']")
+        page.click(".hero-actions [data-open-section='assets']")
+        page.wait_for_function(
+            "() => !document.getElementById('section-assets').classList.contains('section-hidden')"
+        )
+        page.click(".nav-item[data-section='tasks']")
+        page.wait_for_function(
+            "() => !document.getElementById('section-tasks').classList.contains('section-hidden')"
+        )
+        page.click(".nav-item[data-section='overview']")
+        page.evaluate("document.querySelector(\"#section-overview .quick-entry-card [data-quick-template='market-policy-watch']\").click()")
+        page.click(".nav-item[data-section='overview']")
+        page.evaluate("document.querySelector(\"#section-overview .quick-entry-card [data-quick-template='market-job-compare']\").click()")
+        page.click(".nav-item[data-section='overview']")
+        page.evaluate("document.querySelector(\"#section-overview .quick-entry-card [data-quick-template='market-batch-article']\").click()")
+        page.click(".nav-item[data-section='overview']")
+        page.evaluate("document.querySelector(\"#section-overview .scenario-card [data-quick-template='market-competitor-watch']\").click()")
+        page.click(".nav-item[data-section='overview']")
+        page.evaluate("document.querySelector(\"#section-overview .scenario-card [data-quick-template='market-product-monitor']\").click()")
+        page.click(".nav-item[data-section='overview']")
+        page.evaluate("document.querySelector(\"#section-overview .scenario-card [data-quick-template='market-policy-watch']\").click()")
         page.click(".nav-item[data-section='extract']")
         page.wait_for_selector("#nl-task-request", state="visible")
         page.fill("#nl-task-request", "monitor this page")
@@ -281,6 +313,11 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.wait_for_function(
             "() => !document.getElementById('insight-compare-mode-panel').classList.contains('section-hidden')"
         )
+        page.evaluate("document.getElementById('insight-mode-single').click()")
+        page.wait_for_function(
+            "() => document.getElementById('insight-compare-mode-panel').classList.contains('section-hidden')"
+        )
+        page.evaluate("document.getElementById('insight-mode-compare').click()")
         page.evaluate(
             "document.getElementById('compare-urls').value = 'https://example.com/a\\nhttps://example.com/b'"
         )
