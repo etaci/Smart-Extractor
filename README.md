@@ -36,8 +36,8 @@
 
 ### 0.环境要求
 
-- Python `>= 3.12`
-- [uv](https://docs.astral.sh/uv/)
+- Python解释器的版本需高于或等于3.12
+- 确保安装了[uv](https://docs.astral.sh/uv/)库
 - 首次使用动态抓取时需要安装现代浏览器（chrome、edge等）
 
 ### 1. 安装依赖
