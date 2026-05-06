@@ -1,15 +1,18 @@
-"""Notification event persistence helpers for SQLiteTaskStore."""
+"""Notification event persistence helpers for the task store."""
 
 from __future__ import annotations
 
 import json
-import sqlite3
 from typing import Any, Callable
 
 from smart_extractor.web.monitor_schedule import current_timestamp
 from smart_extractor.web.task_models import NotificationEventRecord
 
-ConnectionFactory = Callable[[], sqlite3.Connection]
+ConnectionFactory = Callable[[], object]
+
+
+def _all_tenants(tenant_id: str) -> bool:
+    return str(tenant_id or "").strip() == "*"
 
 
 def _normalize_limit(value: int, *, default: int = 20) -> int:
@@ -18,6 +21,35 @@ def _normalize_limit(value: int, *, default: int = 20) -> int:
     except (TypeError, ValueError):
         limit = default
     return max(limit, 1)
+
+
+def _insert_notification_row(conn, values: tuple[Any, ...]) -> int:
+    if getattr(conn, "dialect", "sqlite") == "postgres":
+        row = conn.execute(
+            """
+            INSERT INTO monitor_notification_events (
+                notification_id, tenant_id, monitor_id, task_id, channel_type, target, event_type,
+                status, status_message, attempt_no, max_attempts, next_retry_at,
+                response_code, error_type, error_message, payload_snapshot_json,
+                created_at, sent_at, retry_of_notification_id, triggered_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            values,
+        ).fetchone()
+        return int(row["id"] or 0)
+    cursor = conn.execute(
+        """
+        INSERT INTO monitor_notification_events (
+            notification_id, tenant_id, monitor_id, task_id, channel_type, target, event_type,
+            status, status_message, attempt_no, max_attempts, next_retry_at,
+            response_code, error_type, error_message, payload_snapshot_json,
+            created_at, sent_at, retry_of_notification_id, triggered_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        values,
+    )
+    return int(cursor.lastrowid or 0)
 
 
 def create_notification_event(
@@ -41,6 +73,7 @@ def create_notification_event(
     sent_at: str = "",
     retry_of_notification_id: str = "",
     triggered_by: str = "system",
+    tenant_id: str = "default",
 ) -> str:
     now = current_timestamp()
     normalized_sent_at = str(sent_at or "").strip()
@@ -50,17 +83,11 @@ def create_notification_event(
 
     with lock:
         with connect() as conn:
-            row_id = conn.execute(
-                """
-                INSERT INTO monitor_notification_events (
-                    notification_id, monitor_id, task_id, channel_type, target, event_type,
-                    status, status_message, attempt_no, max_attempts, next_retry_at,
-                    response_code, error_type, error_message, payload_snapshot_json,
-                    created_at, sent_at, retry_of_notification_id, triggered_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+            row_id = _insert_notification_row(
+                conn,
                 (
                     "",
+                    tenant_id,
                     str(monitor_id or "").strip(),
                     str(task_id or "").strip(),
                     str(channel_type or "webhook").strip() or "webhook",
@@ -80,7 +107,7 @@ def create_notification_event(
                     str(retry_of_notification_id or "").strip(),
                     str(triggered_by or "system").strip() or "system",
                 ),
-            ).lastrowid
+            )
             notification_id = f"ntf-{int(row_id):06d}"
             conn.execute(
                 """
@@ -98,15 +125,16 @@ def fetch_notification_event(
     *,
     connect: ConnectionFactory,
     notification_id: str,
+    tenant_id: str = "default",
 ) -> NotificationEventRecord | None:
     with connect() as conn:
         row = conn.execute(
             """
             SELECT *
             FROM monitor_notification_events
-            WHERE notification_id=?
+            WHERE tenant_id=? AND notification_id=?
             """,
-            (str(notification_id or "").strip(),),
+            (tenant_id, str(notification_id or "").strip()),
         ).fetchone()
     if row is None:
         return None
@@ -122,9 +150,14 @@ def fetch_notification_events(
     task_id: str = "",
     event_type: str = "",
     created_after: str = "",
+    tenant_id: str = "default",
 ) -> list[NotificationEventRecord]:
     conditions: list[str] = []
     params: list[Any] = []
+
+    if not _all_tenants(tenant_id):
+        conditions.append("tenant_id=?")
+        params.append(tenant_id)
 
     normalized_monitor_id = str(monitor_id or "").strip()
     if normalized_monitor_id:
@@ -151,14 +184,11 @@ def fetch_notification_events(
         conditions.append("created_at>=?")
         params.append(normalized_created_after)
 
-    where_sql = ""
-    if conditions:
-        where_sql = "WHERE " + " AND ".join(conditions)
-
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"""
         SELECT *
         FROM monitor_notification_events
-        {where_sql}
+        {where_clause}
         ORDER BY created_at DESC, id DESC
         LIMIT ?
     """
@@ -175,6 +205,7 @@ def update_notification_event(
     connect: ConnectionFactory,
     notification_id: str,
     fields: dict[str, Any],
+    tenant_id: str = "default",
 ) -> None:
     allowed_fields = {
         "status",
@@ -197,7 +228,7 @@ def update_notification_event(
     for key, value in normalized_fields.items():
         assignments.append(f"{key}=?")
         params.append(value)
-    params.append(str(notification_id or "").strip())
+    params.extend([tenant_id, str(notification_id or "").strip()])
 
     with lock:
         with connect() as conn:
@@ -205,7 +236,7 @@ def update_notification_event(
                 f"""
                 UPDATE monitor_notification_events
                 SET {", ".join(assignments)}
-                WHERE notification_id=?
+                WHERE tenant_id=? AND notification_id=?
                 """,
                 tuple(params),
             )
@@ -217,25 +248,45 @@ def fetch_due_notification_retries(
     connect: ConnectionFactory,
     due_before: str,
     limit: int = 10,
+    tenant_id: str = "default",
 ) -> list[NotificationEventRecord]:
     normalized_due_before = str(due_before or "").strip()
     if not normalized_due_before:
         return []
 
     with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT *
-            FROM monitor_notification_events
-            WHERE status='retry_pending'
-              AND next_retry_at<>''
-              AND next_retry_at<=?
-            ORDER BY next_retry_at ASC, created_at ASC, id ASC
-            LIMIT ?
-            """,
-            (
-                normalized_due_before,
-                _normalize_limit(limit, default=10),
-            ),
-        ).fetchall()
+        if _all_tenants(tenant_id):
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM monitor_notification_events
+                WHERE status='retry_pending'
+                  AND next_retry_at<>''
+                  AND next_retry_at<=?
+                ORDER BY next_retry_at ASC, created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (
+                    normalized_due_before,
+                    _normalize_limit(limit, default=10),
+                ),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM monitor_notification_events
+                WHERE tenant_id=?
+                  AND status='retry_pending'
+                  AND next_retry_at<>''
+                  AND next_retry_at<=?
+                ORDER BY next_retry_at ASC, created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (
+                    tenant_id,
+                    normalized_due_before,
+                    _normalize_limit(limit, default=10),
+                ),
+            ).fetchall()
     return [NotificationEventRecord.from_row(row) for row in rows]

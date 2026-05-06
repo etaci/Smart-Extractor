@@ -22,6 +22,11 @@ from smart_extractor import __version__
 from smart_extractor.config import load_config
 from smart_extractor.utils.encoding import configure_utf8_io
 from smart_extractor.utils.logger import setup_logger
+from smart_extractor.web.database_admin import (
+    backup_task_store_database,
+    migrate_task_store_database,
+    restore_task_store_database,
+)
 
 APP_VERSION = __version__
 
@@ -77,6 +82,11 @@ def _build_task_store(config_file: Optional[str] = None):
 
     return app_config, SQLiteTaskStore(
         Path(app_config.storage.output_dir) / "web_tasks.db",
+        database_url=(
+            app_config.storage.task_store_database_url
+            or app_config.storage.database_url
+        ),
+        default_tenant_id=app_config.security.default_tenant_id,
         sqlite_busy_timeout_ms=app_config.storage.sqlite_busy_timeout_ms,
         sqlite_enable_wal=app_config.storage.sqlite_enable_wal,
         sqlite_synchronous=app_config.storage.sqlite_synchronous,
@@ -594,6 +604,76 @@ def smoke_sites(
         fetcher.close()
     console.print(table)
     console.print(f"\n通过 {success}/{len(urls)}")
+
+
+@app.command("db-migrate")
+def db_migrate(
+    config_file: Optional[str] = typer.Option(None, "--config", help="配置文件路径"),
+):
+    """初始化或迁移任务治理数据库结构。"""
+    _show_banner()
+    app_config = load_config(config_file)
+    setup_logger(app_config.log)
+    result = migrate_task_store_database(app_config)
+    console.print(
+        Panel(
+            f"[bold green][PASS] 数据库迁移完成[/]\n\n"
+            f"数据库: {result['database_url']}\n"
+            f"方言: {result['dialect']}\n"
+            f"表数量: {len(result['tables'])}",
+            title="数据库运维",
+            border_style="green",
+        )
+    )
+
+
+@app.command("db-backup")
+def db_backup(
+    config_file: Optional[str] = typer.Option(None, "--config", help="配置文件路径"),
+    output_dir: str = typer.Option("", "--output-dir", help="备份输出目录"),
+):
+    """导出任务治理数据库逻辑备份。"""
+    _show_banner()
+    app_config = load_config(config_file)
+    setup_logger(app_config.log)
+    backup_path = backup_task_store_database(
+        app_config,
+        backup_path=output_dir,
+    )
+    console.print(
+        Panel(
+            f"[bold green][PASS] 数据库备份完成[/]\n\n"
+            f"备份文件: {backup_path}",
+            title="数据库运维",
+            border_style="green",
+        )
+    )
+
+
+@app.command("db-restore")
+def db_restore(
+    backup_file: str = typer.Argument(..., help="备份文件路径"),
+    config_file: Optional[str] = typer.Option(None, "--config", help="配置文件路径"),
+):
+    """从逻辑备份恢复任务治理数据库。"""
+    _show_banner()
+    app_config = load_config(config_file)
+    setup_logger(app_config.log)
+    result = restore_task_store_database(
+        app_config,
+        backup_file=backup_file,
+    )
+    restored_total = sum(int(value or 0) for value in result["restored_rows"].values())
+    console.print(
+        Panel(
+            f"[bold green][PASS] 数据库恢复完成[/]\n\n"
+            f"备份文件: {result['backup_file']}\n"
+            f"数据库: {result['database_url']}\n"
+            f"恢复记录数: {restored_total}",
+            title="数据库运维",
+            border_style="green",
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -19,6 +19,9 @@ def _write_test_config(
     allowed_hosts: list[str] | None = None,
     trusted_proxy_ips: list[str] | None = None,
     request_max_body_bytes: int = 1048576,
+    auth_secret_key: str = "",
+    bootstrap_admin_password: str = "",
+    bootstrap_admin_username: str = "admin",
 ) -> None:
     config_data = {
         "llm": {
@@ -67,6 +70,13 @@ def _write_test_config(
             "rotation": "10 MB",
             "retention": "1 day",
         },
+        "security": {
+            "auth_secret_key": auth_secret_key,
+            "bootstrap_admin_username": bootstrap_admin_username,
+            "bootstrap_admin_password": bootstrap_admin_password,
+            "default_tenant_id": "default",
+            "audit_log_enabled": True,
+        },
     }
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as config_file:
@@ -85,6 +95,9 @@ def _build_test_client(
     allowed_hosts: list[str] | None = None,
     trusted_proxy_ips: list[str] | None = None,
     request_max_body_bytes: int = 1048576,
+    auth_secret_key: str = "",
+    bootstrap_admin_password: str = "",
+    bootstrap_admin_username: str = "admin",
 ):
     output_dir = tmp_path / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -101,6 +114,9 @@ def _build_test_client(
         allowed_hosts=allowed_hosts,
         trusted_proxy_ips=trusted_proxy_ips,
         request_max_body_bytes=request_max_body_bytes,
+        auth_secret_key=auth_secret_key,
+        bootstrap_admin_password=bootstrap_admin_password,
+        bootstrap_admin_username=bootstrap_admin_username,
     )
 
     import smart_extractor.config as config_module
@@ -163,6 +179,15 @@ def _build_test_client(
     monkeypatch.setenv(
         "SMART_EXTRACTOR_WEB_NOTIFICATION_DIGEST_BATCH_SIZE",
         "10",
+    )
+    monkeypatch.setenv("SMART_EXTRACTOR_AUTH_SECRET_KEY", auth_secret_key)
+    monkeypatch.setenv(
+        "SMART_EXTRACTOR_BOOTSTRAP_ADMIN_PASSWORD",
+        bootstrap_admin_password,
+    )
+    monkeypatch.setenv(
+        "SMART_EXTRACTOR_BOOTSTRAP_ADMIN_USERNAME",
+        bootstrap_admin_username,
     )
 
     import smart_extractor.web.routes as routes_module

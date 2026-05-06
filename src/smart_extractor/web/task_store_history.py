@@ -1,8 +1,7 @@
-"""历史查询与任务详情组装辅助函数。"""
+"""History queries and task-detail composition helpers."""
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Any, Callable
 
 from smart_extractor.web.management_helpers import (
@@ -16,7 +15,7 @@ from smart_extractor.web.task_insights import (
 )
 from smart_extractor.web.task_models import TaskRecord
 
-ConnectionFactory = Callable[[], sqlite3.Connection]
+ConnectionFactory = Callable[[], object]
 
 
 def fetch_tasks_by_url(
@@ -24,11 +23,12 @@ def fetch_tasks_by_url(
     connect: ConnectionFactory,
     url: str,
     limit: int = 10,
+    tenant_id: str = "default",
 ) -> list[TaskRecord]:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM web_tasks WHERE url=? ORDER BY id DESC LIMIT ?",
-            (url, int(limit)),
+            "SELECT * FROM web_tasks WHERE tenant_id=? AND url=? ORDER BY id DESC LIMIT ?",
+            (tenant_id, url, int(limit)),
         ).fetchall()
     return [TaskRecord.from_row(row) for row in rows]
 
@@ -38,6 +38,7 @@ def fetch_tasks_by_learned_profile(
     connect: ConnectionFactory,
     profile_id: str,
     limit: int = 12,
+    tenant_id: str = "default",
 ) -> list[TaskRecord]:
     normalized_profile_id = str(profile_id or "").strip()
     if not normalized_profile_id:
@@ -46,7 +47,8 @@ def fetch_tasks_by_learned_profile(
     matched: list[TaskRecord] = []
     with connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM web_tasks WHERE parent_task_id='' ORDER BY id DESC"
+            "SELECT * FROM web_tasks WHERE tenant_id=? AND parent_task_id='' ORDER BY id DESC",
+            (tenant_id,),
         ).fetchall()
     for row in rows:
         task = TaskRecord.from_row(row)
@@ -68,11 +70,11 @@ def fetch_previous_success(
         row = conn.execute(
             """
             SELECT * FROM web_tasks
-            WHERE url=? AND status='success' AND id < ?
+            WHERE tenant_id=? AND url=? AND status='success' AND id < ?
             ORDER BY id DESC
             LIMIT 1
             """,
-            (task.url, int(task.db_id)),
+            (task.tenant_id, task.url, int(task.db_id)),
         ).fetchone()
     if row is None:
         return None
@@ -94,9 +96,9 @@ def fetch_history_summary(
                 MIN(created_at) AS first_seen_at,
                 MAX(CASE WHEN status='success' THEN completed_at ELSE '' END) AS last_success_at
             FROM web_tasks
-            WHERE url=?
+            WHERE tenant_id=? AND url=?
             """,
-            (task.url,),
+            (task.tenant_id, task.url),
         ).fetchone()
 
     previous_success = fetch_previous_success(connect=connect, task=task)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import Callable, Optional
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from loguru import logger
 
@@ -24,14 +25,32 @@ _PROGRESS_STEPS: tuple[tuple[str, int, str], ...] = (
 )
 
 
+def _mask_proxy_url(proxy_url: str) -> str:
+    normalized_url = str(proxy_url or "").strip()
+    if not normalized_url:
+        return ""
+    parts = urlsplit(normalized_url)
+    hostname = parts.hostname or ""
+    if not hostname:
+        return normalized_url
+    credentials = ""
+    if parts.username:
+        credentials = f"{parts.username}:***@"
+    netloc = f"{credentials}{hostname}"
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 def _build_progress_hook(
     task_store,
     task_id: str,
     percent: int,
     message: str,
+    tenant_id: str,
 ) -> Callable[..., None]:
     def _hook(**_kwargs) -> None:
-        task_store.update_progress(task_id, percent, message)
+        task_store.update_progress(task_id, percent, message, tenant_id=tenant_id)
 
     return _hook
 
@@ -41,18 +60,27 @@ def _update_monitor_result(
     task_store,
     monitor_id: str,
     task_id: str,
-    sync_monitor_notification_fn: Callable[[str, str], None],
+    tenant_id: str,
+    sync_monitor_notification_fn: Callable[..., None],
 ) -> None:
     if not monitor_id:
         return
 
-    latest_task = task_store.get(task_id)
+    latest_task = task_store.get(task_id, tenant_id=tenant_id)
     if latest_task is None:
         return
 
-    updated_monitor = task_store.update_monitor_result(monitor_id, latest_task)
+    updated_monitor = task_store.update_monitor_result(
+        monitor_id,
+        latest_task,
+        tenant_id=latest_task.tenant_id,
+    )
     if updated_monitor is not None:
-        sync_monitor_notification_fn(monitor_id, latest_task.task_id)
+        sync_monitor_notification_fn(
+            monitor_id,
+            latest_task.task_id,
+            tenant_id=tenant_id,
+        )
 
 
 def _aggregate_notification_results(results: list[object]) -> tuple[str, str]:
@@ -89,12 +117,16 @@ def sync_monitor_notification(
     *,
     monitor_id: str,
     task_id: str,
+    tenant_id: str,
     task_store,
     should_notify_fn: Callable[..., bool],
     send_monitor_notification_fn: Callable[..., object],
 ) -> None:
-    monitor = task_store.get_monitor(monitor_id)
-    task = task_store.get(task_id)
+    task = task_store.get(task_id, tenant_id=tenant_id)
+    monitor = task_store.get_monitor(
+        monitor_id,
+        tenant_id=tenant_id,
+    )
     if monitor is None or task is None:
         return
 
@@ -120,11 +152,13 @@ def sync_monitor_notification(
             status_message=skip_message,
             payload_snapshot=payload_snapshot,
             error_type="missing_target",
+            tenant_id=tenant_id,
         )
         task_store.update_monitor_notification(
             monitor_id,
             status="skipped",
             message=skip_message,
+            tenant_id=tenant_id,
         )
         return
 
@@ -149,11 +183,13 @@ def sync_monitor_notification(
                 status_message=skip_message,
                 payload_snapshot=payload_snapshot,
                 error_type="rule_filtered",
+                tenant_id=tenant_id,
             )
         task_store.update_monitor_notification(
             monitor_id,
             status="skipped",
             message=skip_message,
+            tenant_id=tenant_id,
         )
         return
 
@@ -200,6 +236,7 @@ def sync_monitor_notification(
             error_message=result.error_message,
             payload_snapshot=result.payload_snapshot,
             sent_at=result.sent_at,
+            tenant_id=tenant_id,
         )
 
     monitor_status, monitor_message = _aggregate_notification_results(results)
@@ -207,51 +244,102 @@ def sync_monitor_notification(
         monitor_id,
         status=monitor_status,
         message=monitor_message,
+        tenant_id=tenant_id,
     )
 
 
 def run_extraction(
     *,
     task_id: str,
+    tenant_id: str = "",
     schema_name: str = "auto",
     use_static: bool = False,
     selected_fields: Optional[list[str]] = None,
     monitor_id: str = "",
     force_strategy: str = "",
+    worker_id: str = "",
     task_store,
     load_config_fn: Callable[[], object],
-    sync_monitor_notification_fn: Callable[[str, str], None],
+    sync_monitor_notification_fn: Callable[..., None],
 ) -> None:
     from smart_extractor.pipeline import ExtractionPipeline
 
-    task = task_store.get(task_id)
+    task = task_store.get(task_id, tenant_id=tenant_id)
     if not task:
         with logger.contextualize(request_id="-", task_id=task_id):
             logger.error("Background task not found: {}", task_id)
         return
 
     selected_field_list = list(selected_fields or [])
+    domain = urlparse(str(task.url or "").strip()).netloc.strip().lower()
+    site_policy = task_store.get_site_policy_for_url(task.url, tenant_id=task.tenant_id)
+    selected_proxy = None
+    acquired_site_slot = False
     with logger.contextualize(request_id=task.request_id or "-", task_id=task.task_id):
-        task_store.mark_running(task.task_id)
+        if worker_id:
+            task_store.heartbeat_worker_node(
+                worker_id=worker_id,
+                display_name=worker_id,
+                status="busy",
+                queue_scope="*",
+                current_load=1,
+                capabilities=["extract", "queue"],
+                metadata={"current_task_id": task.task_id},
+                tenant_id=task.tenant_id,
+            )
+        if site_policy is not None and domain:
+            while True:
+                site_slot = task_store.acquire_site_execution_slot(
+                    domain=domain,
+                    tenant_id=task.tenant_id,
+                    min_interval_seconds=site_policy.min_interval_seconds,
+                    max_concurrency=site_policy.max_concurrency,
+                )
+                if site_slot.get("acquired"):
+                    acquired_site_slot = True
+                    break
+                time.sleep(min(max(float(site_slot.get("wait_seconds", 0.1) or 0.1), 0.1), 2.0))
+            if site_policy.use_proxy_pool:
+                selected_proxy = task_store.pick_proxy_endpoint(
+                    preferred_tags=list(site_policy.preferred_proxy_tags or []),
+                    tenant_id=task.tenant_id,
+                )
+        task_store.mark_running(task.task_id, tenant_id=task.tenant_id)
         start_at = time.perf_counter()
         logger.info(
-            "Background extraction started: url={} mode={} format={} static={} selected_fields={}",
+            "Background extraction started: url={} mode={} format={} static={} selected_fields={} worker_id={} proxy_id={}",
             task.url,
             task.schema_name,
             task.storage_format,
             use_static,
             selected_field_list,
+            worker_id or "-",
+            selected_proxy.proxy_id if selected_proxy is not None else "-",
         )
 
         try:
+            runtime_config = load_config_fn()
+            if selected_proxy is not None:
+                runtime_config.fetcher.proxy_url = selected_proxy.proxy_url
+                logger.info(
+                    "Apply selected proxy to fetcher runtime: proxy_id={} proxy_url={}",
+                    selected_proxy.proxy_id,
+                    _mask_proxy_url(selected_proxy.proxy_url),
+                )
             with ExtractionPipeline(
-                config=load_config_fn(),
+                config=runtime_config,
                 use_dynamic_fetcher=not use_static,
             ) as pipeline:
                 for hook_name, percent, message in _PROGRESS_STEPS:
                     pipeline.add_hook(
                         hook_name,
-                        _build_progress_hook(task_store, task.task_id, percent, message),
+                        _build_progress_hook(
+                            task_store,
+                            task.task_id,
+                            percent,
+                            message,
+                            task.tenant_id,
+                        ),
                     )
                 result = pipeline.run(
                     url=task.url,
@@ -286,6 +374,39 @@ def run_extraction(
                             extractor_stats.get("api_usage_ratio", 0.0) or 0.0
                         ),
                     }
+                fetch_elapsed_ms = (
+                    float(result.fetch_result.elapsed_ms or 0.0)
+                    if result.fetch_result is not None
+                    else 0.0
+                )
+                retry_count = (
+                    int(getattr(result.fetch_result, "retry_count", 0) or 0)
+                    if result.fetch_result is not None
+                    else 0
+                )
+                task_cost = float(
+                    saved_data.get("_llm_usage", {}).get("estimated_cost_usd", 0.0)
+                    if isinstance(saved_data.get("_llm_usage"), dict)
+                    else 0.0
+                )
+                saved_data["_runtime_metrics"] = {
+                    "fetcher_type": "static" if use_static else "playwright",
+                    "fetch_elapsed_ms": fetch_elapsed_ms,
+                    "playwright_elapsed_ms": fetch_elapsed_ms if not use_static else 0.0,
+                    "retry_count": retry_count,
+                    "retry_cost_usd": round(task_cost * max(retry_count, 0), 6),
+                    "total_elapsed_ms": float(elapsed_ms or 0.0),
+                }
+                saved_data["_execution_context"] = {
+                    "worker_id": worker_id,
+                    "site_policy_id": site_policy.policy_id if site_policy is not None else "",
+                    "site_domain": domain,
+                    "proxy_id": selected_proxy.proxy_id if selected_proxy is not None else "",
+                    "proxy_provider": selected_proxy.provider if selected_proxy is not None else "",
+                    "assigned_worker_group": (
+                        site_policy.assigned_worker_group if site_policy is not None else ""
+                    ),
+                }
                 task_store.mark_success(
                     task.task_id,
                     elapsed_ms=elapsed_ms,
@@ -293,13 +414,21 @@ def run_extraction(
                     if result.validation
                     else 0.0,
                     data=saved_data or None,
+                    tenant_id=task.tenant_id,
                 )
                 _update_monitor_result(
                     task_store=task_store,
                     monitor_id=monitor_id,
                     task_id=task.task_id,
+                    tenant_id=task.tenant_id,
                     sync_monitor_notification_fn=sync_monitor_notification_fn,
                 )
+                if selected_proxy is not None:
+                    task_store.mark_proxy_endpoint_result(
+                        selected_proxy.proxy_id,
+                        success=True,
+                        tenant_id=task.tenant_id,
+                    )
                 logger.info(
                     "Background extraction succeeded: elapsed_ms={:.0f}", elapsed_ms
                 )
@@ -309,13 +438,22 @@ def run_extraction(
                 task.task_id,
                 elapsed_ms=elapsed_ms,
                 error=result.error or "未知错误",
+                tenant_id=task.tenant_id,
             )
             _update_monitor_result(
                 task_store=task_store,
                 monitor_id=monitor_id,
                 task_id=task.task_id,
+                tenant_id=task.tenant_id,
                 sync_monitor_notification_fn=sync_monitor_notification_fn,
             )
+            if selected_proxy is not None:
+                task_store.mark_proxy_endpoint_result(
+                    selected_proxy.proxy_id,
+                    success=False,
+                    error=result.error or "task_failed",
+                    tenant_id=task.tenant_id,
+                )
             logger.error("Background extraction failed: {}", result.error)
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start_at) * 1000
@@ -323,11 +461,34 @@ def run_extraction(
                 task.task_id,
                 elapsed_ms=elapsed_ms,
                 error=f"{type(exc).__name__}: {exc}",
+                tenant_id=task.tenant_id,
             )
             _update_monitor_result(
                 task_store=task_store,
                 monitor_id=monitor_id,
                 task_id=task.task_id,
+                tenant_id=task.tenant_id,
                 sync_monitor_notification_fn=sync_monitor_notification_fn,
             )
+            if selected_proxy is not None:
+                task_store.mark_proxy_endpoint_result(
+                    selected_proxy.proxy_id,
+                    success=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                    tenant_id=task.tenant_id,
+                )
             logger.exception("Background extraction crashed")
+        finally:
+            if acquired_site_slot and domain:
+                task_store.release_site_execution_slot(domain=domain, tenant_id=task.tenant_id)
+            if worker_id:
+                task_store.heartbeat_worker_node(
+                    worker_id=worker_id,
+                    display_name=worker_id,
+                    status="idle",
+                    queue_scope="*",
+                    current_load=0,
+                    capabilities=["extract", "queue"],
+                    metadata={},
+                    tenant_id=task.tenant_id,
+                )

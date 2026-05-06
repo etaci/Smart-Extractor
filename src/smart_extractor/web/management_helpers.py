@@ -233,6 +233,56 @@ def normalize_profile_payload(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+def apply_monitor_notification_defaults(
+    profile: dict[str, object] | None,
+    *,
+    suggested_channel_types: list[str] | None = None,
+) -> dict[str, object]:
+    raw_profile = dict(profile or {})
+    normalized_profile = normalize_profile_payload(raw_profile)
+    for key, value in raw_profile.items():
+        normalized_profile.setdefault(str(key), value)
+    normalized_channel_types = [
+        str(item).strip().lower()
+        for item in (suggested_channel_types or ["webhook"])
+        if str(item).strip()
+    ]
+    if not normalized_channel_types:
+        normalized_channel_types = ["webhook"]
+
+    notification_defaults = {
+        "notify_on": list(normalized_profile.get("notify_on", ["changed", "error"])),
+        "always_notify_error": bool(normalized_profile.get("always_notify_error", True)),
+        "digest_enabled": bool(normalized_profile.get("digest_enabled", False)),
+        "digest_only": bool(normalized_profile.get("digest_only", False)),
+        "notification_cooldown_minutes": normalize_minutes(
+            normalized_profile.get("notification_cooldown_minutes", 0),
+            0,
+        ),
+        "min_change_count": normalize_minutes(
+            normalized_profile.get("min_change_count", 0),
+            0,
+        ),
+        "min_change_ratio": normalize_ratio(
+            normalized_profile.get("min_change_ratio", 0.0),
+            0.0,
+        ),
+        "channel_required": True,
+        "suggested_channel_types": normalized_channel_types,
+    }
+    normalized_profile["notification_strategy_version"] = "v1"
+    normalized_profile["notification_setup_status"] = (
+        "ready" if notification_channels_from_profile(normalized_profile) else "pending_channel"
+    )
+    normalized_profile["notification_defaults"] = notification_defaults
+    normalized_profile["notification_activation_checklist"] = [
+        "配置 webhook、Slack 或 Teams 通知目标",
+        "确认 changed / error 的通知级别",
+        "确认静默时段、冷却时间与 digest 设置",
+    ]
+    return normalized_profile
+
+
 def normalize_selected_fields(values: list[object]) -> list[str]:
     return [str(item).strip() for item in values if str(item).strip()]
 
@@ -359,6 +409,23 @@ def serialize_learned_profile(profile: Any) -> dict[str, object]:
     payload["memory_strength"] = learned_profile_memory_strength(profile)
     payload["memory_strength_label"] = learned_profile_memory_strength_label(
         payload["memory_strength"]
+    )
+    payload["manual_annotation_count"] = int(
+        getattr(profile, "manual_annotation_count", 0) or 0
+    )
+    payload["auto_repair_count"] = int(getattr(profile, "auto_repair_count", 0) or 0)
+    payload["last_annotation_at"] = str(
+        getattr(profile, "last_annotation_at", "") or ""
+    )
+    payload["last_repair_at"] = str(getattr(profile, "last_repair_at", "") or "")
+    payload["repair_recommendation"] = (
+        "建议继续保留自动修复闭环"
+        if payload["auto_repair_count"] > 0
+        else (
+            "建议补一次人工标注，提升模板长期稳定性"
+            if payload["risk_level"] in {"medium", "high"}
+            else "当前模板稳定，可继续观察"
+        )
     )
     return payload
 
@@ -831,6 +898,134 @@ def serialize_task_batch_child_item(task: Any) -> dict[str, object]:
     }
 
 
+def serialize_actor_install(record: Any) -> dict[str, object]:
+    payload = record.to_dict()
+    return {
+        "actor_instance_id": payload.get("actor_instance_id", ""),
+        "actor_id": payload.get("actor_id", ""),
+        "name": payload.get("name", ""),
+        "version": payload.get("version", ""),
+        "category": payload.get("category", ""),
+        "capabilities": payload.get("capabilities", []),
+        "config": payload.get("config", {}),
+        "linked_template_id": payload.get("linked_template_id", ""),
+        "linked_monitor_id": payload.get("linked_monitor_id", ""),
+        "status": payload.get("status", "active"),
+        "created_at": payload.get("created_at", ""),
+        "updated_at": payload.get("updated_at", ""),
+        "last_run_at": payload.get("last_run_at", ""),
+    }
+
+
+def serialize_worker_node(record: Any) -> dict[str, object]:
+    payload = record.to_dict()
+    return {
+        "worker_id": payload.get("worker_id", ""),
+        "display_name": payload.get("display_name", ""),
+        "node_type": payload.get("node_type", "worker"),
+        "status": payload.get("status", "idle"),
+        "queue_scope": payload.get("queue_scope", "*"),
+        "current_load": payload.get("current_load", 0),
+        "capabilities": payload.get("capabilities", []),
+        "metadata": payload.get("metadata", {}),
+        "last_seen_at": payload.get("last_seen_at", ""),
+        "created_at": payload.get("created_at", ""),
+        "updated_at": payload.get("updated_at", ""),
+        "last_error": payload.get("last_error", ""),
+    }
+
+
+def serialize_proxy_endpoint(record: Any) -> dict[str, object]:
+    payload = record.to_dict()
+    return {
+        "proxy_id": payload.get("proxy_id", ""),
+        "name": payload.get("name", ""),
+        "proxy_url": payload.get("proxy_url", ""),
+        "provider": payload.get("provider", ""),
+        "status": payload.get("status", "idle"),
+        "enabled": payload.get("enabled", True),
+        "tags": payload.get("tags", []),
+        "metadata": payload.get("metadata", {}),
+        "success_count": payload.get("success_count", 0),
+        "failure_count": payload.get("failure_count", 0),
+        "last_used_at": payload.get("last_used_at", ""),
+        "created_at": payload.get("created_at", ""),
+        "updated_at": payload.get("updated_at", ""),
+        "last_error": payload.get("last_error", ""),
+    }
+
+
+def serialize_site_policy(record: Any) -> dict[str, object]:
+    payload = record.to_dict()
+    return {
+        "policy_id": payload.get("policy_id", ""),
+        "domain": payload.get("domain", ""),
+        "name": payload.get("name", ""),
+        "min_interval_seconds": payload.get("min_interval_seconds", 0.0),
+        "max_concurrency": payload.get("max_concurrency", 1),
+        "use_proxy_pool": payload.get("use_proxy_pool", False),
+        "preferred_proxy_tags": payload.get("preferred_proxy_tags", []),
+        "assigned_worker_group": payload.get("assigned_worker_group", ""),
+        "notes": payload.get("notes", ""),
+        "created_at": payload.get("created_at", ""),
+        "updated_at": payload.get("updated_at", ""),
+    }
+
+
+def serialize_task_annotation(record: Any) -> dict[str, object]:
+    payload = record.to_dict()
+    return {
+        "annotation_id": payload.get("annotation_id", ""),
+        "task_id": payload.get("task_id", ""),
+        "profile_id": payload.get("profile_id", ""),
+        "template_id": payload.get("template_id", ""),
+        "corrected_data": payload.get("corrected_data", {}),
+        "field_feedback": payload.get("field_feedback", {}),
+        "notes": payload.get("notes", ""),
+        "created_by": payload.get("created_by", ""),
+        "created_at": payload.get("created_at", ""),
+        "updated_at": payload.get("updated_at", ""),
+    }
+
+
+def serialize_repair_suggestion(record: Any) -> dict[str, object]:
+    payload = record.to_dict()
+    return {
+        "repair_id": payload.get("repair_id", ""),
+        "annotation_id": payload.get("annotation_id", ""),
+        "task_id": payload.get("task_id", ""),
+        "profile_id": payload.get("profile_id", ""),
+        "template_id": payload.get("template_id", ""),
+        "status": payload.get("status", "suggested"),
+        "repair_strategy": payload.get("repair_strategy", "manual_feedback"),
+        "suggested_fields": payload.get("suggested_fields", []),
+        "suggested_field_labels": payload.get("suggested_field_labels", {}),
+        "suggested_profile": payload.get("suggested_profile", {}),
+        "reason": payload.get("reason", ""),
+        "created_at": payload.get("created_at", ""),
+        "updated_at": payload.get("updated_at", ""),
+        "applied_at": payload.get("applied_at", ""),
+    }
+
+
+def serialize_funnel_event(record: Any) -> dict[str, object]:
+    payload = record.to_dict()
+    return {
+        "funnel_event_id": payload.get("funnel_event_id", ""),
+        "stage": payload.get("stage", ""),
+        "channel": payload.get("channel", ""),
+        "package_type": payload.get("package_type", ""),
+        "package_id": payload.get("package_id", ""),
+        "package_name": payload.get("package_name", ""),
+        "task_id": payload.get("task_id", ""),
+        "template_id": payload.get("template_id", ""),
+        "monitor_id": payload.get("monitor_id", ""),
+        "actor_instance_id": payload.get("actor_instance_id", ""),
+        "metadata": payload.get("metadata", {}),
+        "created_at": payload.get("created_at", ""),
+    }
+
+
 def list_risky_active_profiles(learned_profile_store: Any) -> list[Any]:
     risky_profiles = []
     for item in learned_profile_store.list_profiles():
@@ -859,7 +1054,7 @@ def llm_basic_payload_from_sources(
         "model": bool(os.environ.get("SMART_EXTRACTOR_MODEL", "")),
     }
     return {
-        "api_key": str(llm_raw.get("api_key", "")),
+        "api_key": str(llm_raw.get("api_key", "") or effective.llm.api_key),
         "base_url": str(llm_raw.get("base_url", effective.llm.base_url)),
         "model": str(llm_raw.get("model", effective.llm.model)),
         "temperature": float(llm_raw.get("temperature", effective.llm.temperature)),

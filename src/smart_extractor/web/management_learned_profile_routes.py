@@ -19,21 +19,33 @@ from smart_extractor.web.management_helpers import (
 def register_learned_profile_routes(
     router: APIRouter,
     *,
-    api_guard: Callable[[Request], None],
+    api_guard: Callable[[Request], Any],
     request_logger: Callable[[Request, str], Any],
     get_request_id: Callable[[Request], str],
     task_store: Any,
     learned_profile_store: Any,
     create_background_extraction_task: Callable[..., str],
 ) -> None:
+    def _tenant_id(request: Request) -> str:
+        identity = getattr(request.state, "identity", None)
+        return str(getattr(identity, "tenant_id", "default") or "default")
+
+    def _require(request: Request, permission: str) -> None:
+        identity = getattr(request.state, "identity", None)
+        require = getattr(identity, "require", None)
+        if callable(require):
+            require(permission)
+
     @router.get("/api/learned_profiles")
     async def api_learned_profiles(
         request: Request,
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
+        _require(request, "dashboard:read")
+        tenant_id = _tenant_id(request)
         request_logger(request, "-").info("List learned profiles")
         monitor_hits: dict[str, int] = {}
-        for monitor in task_store.list_monitors(limit=200):
+        for monitor in task_store.list_monitors(limit=200, tenant_id=tenant_id):
             profile_id = str(monitor.last_learned_profile_id or "").strip()
             if profile_id:
                 monitor_hits[profile_id] = monitor_hits.get(profile_id, 0) + 1
@@ -60,8 +72,9 @@ def register_learned_profile_routes(
         profile_id: str,
         payload: LearnedProfileActionRequest,
         request: Request,
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
+        _require(request, "monitor:manage")
         profile = learned_profile_store.set_profile_active(
             profile_id,
             is_active=False,
@@ -79,8 +92,9 @@ def register_learned_profile_routes(
     async def api_disable_risky_learned_profiles(
         payload: LearnedProfileBulkActionRequest,
         request: Request,
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
+        _require(request, "monitor:manage")
         risky_profiles = list_risky_active_profiles(learned_profile_store)
         affected_profiles = []
         reason = payload.reason.strip() or "批量停用高风险学习档案"
@@ -106,12 +120,17 @@ def register_learned_profile_routes(
     async def api_learned_profile_detail(
         profile_id: str,
         request: Request,
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
+        _require(request, "dashboard:read")
         profile = learned_profile_store.get_profile(profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="学习档案不存在")
-        activity = task_store.get_learned_profile_activity(profile_id, task_limit=10)
+        activity = task_store.get_learned_profile_activity(
+            profile_id,
+            task_limit=10,
+            tenant_id=_tenant_id(request),
+        )
         request_logger(request, "-").info("Get learned profile detail: {}", profile_id)
         return {
             "profile": serialize_learned_profile(profile),
@@ -123,8 +142,9 @@ def register_learned_profile_routes(
         profile_id: str,
         background_tasks: BackgroundTasks,
         request: Request,
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
+        _require(request, "task:create")
         profile = learned_profile_store.get_profile(profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="学习档案不存在")
@@ -137,6 +157,7 @@ def register_learned_profile_routes(
             schema_name="auto",
             storage_format="json",
             request_id=get_request_id(request),
+            tenant_id=_tenant_id(request),
             background_tasks=background_tasks,
             use_static=False,
             selected_fields=list(profile.selected_fields or []),
@@ -159,8 +180,10 @@ def register_learned_profile_routes(
         payload: LearnedProfileBulkActionRequest,
         background_tasks: BackgroundTasks,
         request: Request,
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
+        _require(request, "task:create")
+        tenant_id = _tenant_id(request)
         risky_profiles = list_risky_active_profiles(learned_profile_store)
         created_tasks: list[dict[str, str]] = []
         for item in risky_profiles:
@@ -172,6 +195,7 @@ def register_learned_profile_routes(
                 schema_name="auto",
                 storage_format="json",
                 request_id=get_request_id(request),
+                tenant_id=tenant_id,
                 background_tasks=background_tasks,
                 use_static=False,
                 selected_fields=list(item.selected_fields or []),
@@ -200,8 +224,9 @@ def register_learned_profile_routes(
     async def api_enable_learned_profile(
         profile_id: str,
         request: Request,
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
+        _require(request, "monitor:manage")
         profile = learned_profile_store.set_profile_active(profile_id, is_active=True)
         if profile is None:
             raise HTTPException(status_code=404, detail="学习档案不存在")
@@ -215,8 +240,9 @@ def register_learned_profile_routes(
     async def api_reset_learned_profile(
         profile_id: str,
         request: Request,
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
+        _require(request, "monitor:manage")
         profile = learned_profile_store.reset_profile(profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="学习档案不存在")
@@ -230,8 +256,9 @@ def register_learned_profile_routes(
     async def api_delete_learned_profile(
         profile_id: str,
         request: Request,
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
+        _require(request, "monitor:manage")
         deleted = learned_profile_store.delete_profile(profile_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="学习档案不存在")

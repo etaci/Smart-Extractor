@@ -13,13 +13,20 @@ from smart_extractor.web.management_helpers import serialize_notification_event
 def register_notification_routes(
     router: APIRouter,
     *,
-    api_guard: Callable[[Request], None],
+    api_guard: Callable[[Request], Any],
     request_logger: Callable[[Request, str], Any],
     task_store: Any,
     send_monitor_notification_fn: Callable[..., object],
     dispatch_notification_attempt_fn: Callable[..., Any],
     dispatch_digest_notifications_fn: Callable[..., Any],
 ) -> None:
+    def _tenant_id(request: Request) -> str:
+        identity = getattr(request.state, "identity", None)
+        require = getattr(identity, "require", None)
+        if callable(require):
+            require("notification:manage")
+        return str(getattr(identity, "tenant_id", "default") or "default")
+
     @router.get("/api/notifications")
     async def api_notifications(
         request: Request,
@@ -28,14 +35,16 @@ def register_notification_routes(
         status: str = "",
         task_id: str = "",
         event_type: str = "",
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
+        tenant_id = _tenant_id(request)
         events = task_store.list_notification_events(
             limit=limit,
             monitor_id=str(monitor_id or "").strip(),
             status=str(status or "").strip().lower(),
             task_id=str(task_id or "").strip(),
             event_type=str(event_type or "").strip().lower(),
+            tenant_id=tenant_id,
         )
         serialized = [serialize_notification_event(item) for item in events]
         request_logger(request, "-").info(
@@ -56,12 +65,14 @@ def register_notification_routes(
         payload: NotificationResendRequest,
         request: Request,
         window_hours: int = 24,
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
+        tenant_id = _tenant_id(request)
         events = dispatch_digest_notifications_fn(
             task_store=task_store,
             send_monitor_notification_fn=send_monitor_notification_fn,
             window_hours=window_hours,
+            tenant_id=tenant_id,
         )
         request_logger(request, "-").info(
             "Send notification digest: window_hours={} count={} reason={}",
@@ -81,9 +92,13 @@ def register_notification_routes(
         notification_id: str,
         payload: NotificationResendRequest,
         request: Request,
-        _: None = Depends(api_guard),
+        _: Any = Depends(api_guard),
     ):
-        source_event = task_store.get_notification_event(notification_id)
+        tenant_id = _tenant_id(request)
+        source_event = task_store.get_notification_event(
+            notification_id,
+            tenant_id=tenant_id,
+        )
         if source_event is None:
             raise HTTPException(status_code=404, detail="通知记录不存在")
         if not str(source_event.target or "").strip() and not source_event.payload_snapshot:

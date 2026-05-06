@@ -205,6 +205,89 @@ class NotificationResendRequest(BaseModel):
 
 
 class SaveTaskTemplateRequest(BaseModel):
-    name: str = Field(min_length=1, description="Template name")
+    name: str = Field(default="", description="Template name")
     template_id: str = Field(default="", description="Existing template id")
     profile: dict[str, object] = Field(default_factory=dict, description="Template profile")
+
+
+class PromoteTaskTemplateRequest(BaseModel):
+    name: str = Field(default="", description="Template name")
+    profile: dict[str, object] = Field(default_factory=dict, description="Template profile")
+    create_monitor: bool = Field(default=False, description="Whether to create monitor together")
+    monitor_name: str = Field(default="", description="Monitor name")
+    schedule_enabled: bool = Field(default=True, description="Whether to enable monitor schedule")
+    schedule_interval_minutes: int = Field(
+        default=180,
+        ge=5,
+        le=10080,
+        description="Monitor interval minutes",
+    )
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, description="Username")
+    password: str = Field(min_length=1, description="Password")
+    tenant_id: str = Field(default="", description="Tenant id")
+
+
+class TaskReviewRequest(BaseModel):
+    confirmed: bool = Field(description="Whether the task result is manually confirmed")
+    accuracy_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Manual accuracy score",
+    )
+    notes: str = Field(default="", description="Reviewer notes")
+
+
+class InstallActorRequest(BaseModel):
+    actor_id: str = Field(min_length=1, description="Actor package id")
+    name: str = Field(default="", description="Installed actor name")
+    create_template: bool = Field(default=True, description="Whether to create linked template")
+    create_monitor: bool = Field(default=False, description="Whether to create linked monitor")
+    config: dict[str, object] = Field(default_factory=dict, description="Actor runtime config")
+
+
+class SaveProxyEndpointRequest(BaseModel):
+    name: str = Field(min_length=1, description="Proxy name")
+    proxy_url: str = Field(min_length=1, description="Proxy url")
+    provider: str = Field(default="", description="Provider name")
+    status: str = Field(default="idle", description="Proxy status")
+    enabled: bool = Field(default=True, description="Whether proxy is enabled")
+    tags: list[str] = Field(default_factory=list, description="Proxy tags")
+    metadata: dict[str, object] = Field(default_factory=dict, description="Proxy metadata")
+    proxy_id: str = Field(default="", description="Existing proxy id")
+
+
+class SaveSitePolicyRequest(BaseModel):
+    domain: str = Field(min_length=1, description="Target domain")
+    name: str = Field(default="", description="Policy name")
+    min_interval_seconds: float = Field(default=0.0, ge=0.0, le=3600.0)
+    max_concurrency: int = Field(default=1, ge=1, le=32)
+    use_proxy_pool: bool = Field(default=False, description="Whether to use proxy pool")
+    preferred_proxy_tags: list[str] = Field(default_factory=list, description="Preferred proxy tags")
+    assigned_worker_group: str = Field(default="", description="Assigned worker group")
+    notes: str = Field(default="", description="Policy notes")
+    policy_id: str = Field(default="", description="Existing policy id")
+
+
+class WorkerHeartbeatRequest(BaseModel):
+    worker_id: str = Field(min_length=1, description="Worker id")
+    display_name: str = Field(default="", description="Display name")
+    node_type: str = Field(default="worker", description="Node type")
+    status: str = Field(default="idle", description="Worker status")
+    queue_scope: str = Field(default="*", description="Queue scope")
+    current_load: int = Field(default=0, ge=0, le=999)
+    capabilities: list[str] = Field(default_factory=list, description="Worker capabilities")
+    metadata: dict[str, object] = Field(default_factory=dict, description="Worker metadata")
+    last_error: str = Field(default="", description="Last error")
+
+
+class TaskAnnotationRequest(BaseModel):
+    profile_id: str = Field(default="", description="Related learned profile id")
+    template_id: str = Field(default="", description="Related template id")
+    corrected_data: dict[str, object] = Field(default_factory=dict, description="Corrected extracted data")
+    field_feedback: dict[str, object] = Field(default_factory=dict, description="Field-level feedback")
+    notes: str = Field(default="", description="Annotation notes")
+    apply_auto_repair: bool = Field(default=False, description="Whether to apply repair immediately")

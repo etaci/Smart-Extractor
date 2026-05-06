@@ -18,6 +18,7 @@ from openai import OpenAI
 
 from smart_extractor.config import AppConfig
 from smart_extractor.extractor.llm_extractor import _extract_chat_message_content
+from smart_extractor.web.database import parse_database_target
 
 
 class ApiRateLimiter:
@@ -217,6 +218,26 @@ def collect_startup_diagnostics(config: AppConfig) -> dict[str, object]:
         warnings.append(
             "启动自检已关闭；如需在启动时验证模型连通性，可开启 startup_check_enabled。"
         )
+
+    if not config.security.auth_secret_key.strip():
+        warnings.append("未配置 auth_secret_key，账号登录与会话签名能力不可用")
+
+    if not config.security.config_secret_key.strip():
+        warnings.append("未配置 config_secret_key，本地 API Key 将以明文形式写入 local.yaml")
+
+    database_url = str(
+        config.storage.task_store_database_url or config.storage.database_url or ""
+    ).strip()
+    if not database_url:
+        warnings.append("未配置 database_url，任务治理数据将回退到本地 SQLite 文件")
+    else:
+        try:
+            database_target = parse_database_target(database_url)
+        except ValueError:
+            warnings.append(f"database_url 配置无法识别: {database_url}")
+        else:
+            if database_target.dialect == "sqlite":
+                warnings.append("生产环境建议使用 PostgreSQL，而不是 SQLite 作为任务治理数据库")
 
     return {
         "ready": not issues,

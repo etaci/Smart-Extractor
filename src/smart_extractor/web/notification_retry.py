@@ -63,6 +63,7 @@ class NotificationRetryService:
         due_events = self._task_store.list_due_notification_retries(
             due_before=started_at,
             limit=self.batch_size,
+            tenant_id="*",
         )
         retried_count = 0
         failed_count = 0
@@ -75,6 +76,7 @@ class NotificationRetryService:
                     status="retrying",
                     status_message="系统正在发起自动重试",
                     next_retry_at="",
+                    tenant_id=event.tenant_id,
                 )
                 retry_event = dispatch_notification_attempt(
                     source_event=event,

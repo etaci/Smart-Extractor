@@ -103,7 +103,8 @@ def test_startup_self_check_model_reachable_via_models_api(test_config):
 
     assert diagnostics["ready"] is True
     assert diagnostics["issues"] == []
-    assert diagnostics["warnings"] == []
+    assert any("auth_secret_key" in item for item in diagnostics["warnings"])
+    assert any("config_secret_key" in item for item in diagnostics["warnings"])
 
 
 def test_startup_self_check_model_failure(test_config):

@@ -7,6 +7,7 @@
 
 import time
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from loguru import logger
@@ -28,16 +29,38 @@ class StaticFetcher(BaseFetcher):
         self._config = config or FetcherConfig()
         self._client: Optional[httpx.Client] = None
 
+    @staticmethod
+    def _mask_proxy_url(proxy_url: str) -> str:
+        normalized_url = str(proxy_url or "").strip()
+        if not normalized_url:
+            return ""
+        parts = urlsplit(normalized_url)
+        hostname = parts.hostname or ""
+        if not hostname:
+            return normalized_url
+        credentials = ""
+        if parts.username:
+            credentials = f"{parts.username}:***@"
+        netloc = f"{credentials}{hostname}"
+        if parts.port:
+            netloc = f"{netloc}:{parts.port}"
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
     def _ensure_client(self) -> httpx.Client:
         """确保 httpx 客户端已初始化"""
         if self._client is None:
             if not self._config.verify_ssl:
                 logger.warning("静态抓取器已关闭 HTTPS 证书校验，仅建议用于受控环境排障")
-            self._client = httpx.Client(
-                timeout=self._config.timeout / 1000,  # 毫秒转秒
-                follow_redirects=True,
-                verify=self._config.verify_ssl,
-            )
+            client_kwargs = {
+                "timeout": self._config.timeout / 1000,
+                "follow_redirects": True,
+                "verify": self._config.verify_ssl,
+            }
+            proxy_url = str(self._config.proxy_url or "").strip()
+            if proxy_url:
+                logger.info("静态抓取使用代理: {}", self._mask_proxy_url(proxy_url))
+                client_kwargs["proxy"] = proxy_url
+            self._client = httpx.Client(**client_kwargs)
         return self._client
 
     def fetch(self, url: str) -> FetchResult:
@@ -83,6 +106,7 @@ class StaticFetcher(BaseFetcher):
                 status_code=response.status_code,
                 headers=headers,
                 elapsed_ms=elapsed,
+                retry_count=0,
             )
 
         except Exception as e:
@@ -95,6 +119,7 @@ class StaticFetcher(BaseFetcher):
                 status_code=0,
                 error=error_msg,
                 elapsed_ms=elapsed,
+                retry_count=0,
             )
 
     def close(self) -> None:

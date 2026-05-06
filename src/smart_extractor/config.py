@@ -12,6 +12,8 @@ import yaml
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
+from smart_extractor.security.crypto import decrypt_secret, encrypt_secret
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "default.yaml"
@@ -73,15 +75,25 @@ def update_llm_basic_config(
     model: str,
     temperature: float,
     config_path: str | Path | None = None,
+    config_secret_key: str = "",
 ) -> Path:
     if config_path is None:
         config_path = resolve_local_config_path()
 
     config_data = load_raw_yaml_config(config_path)
     llm_data = dict(config_data.get("llm", {}))
+    normalized_api_key = str(api_key)
+    if config_secret_key and normalized_api_key:
+        llm_data["api_key_encrypted"] = encrypt_secret(
+            config_secret_key,
+            normalized_api_key,
+        )
+        llm_data["api_key"] = ""
+    else:
+        llm_data["api_key"] = normalized_api_key
+        llm_data.pop("api_key_encrypted", None)
     llm_data.update(
         {
-            "api_key": str(api_key),
             "base_url": str(base_url),
             "model": str(model),
             "temperature": float(temperature),
@@ -126,6 +138,7 @@ class FetcherConfig(BaseSettings):
     screenshot: bool = Field(default=False, description="是否保存页面截图")
     screenshot_dir: str = Field(default="screenshots", description="截图保存目录")
     user_agent: Optional[str] = Field(default=None, description="自定义 User-Agent")
+    proxy_url: Optional[str] = Field(default=None, description="抓取阶段使用的代理 URL")
     storage_state_path: Optional[str] = Field(
         default=None, description="Playwright storage_state 文件路径"
     )
@@ -163,6 +176,18 @@ class StorageConfig(BaseSettings):
     default_format: str = Field(default="json", description="默认输出格式")
     sqlite_db_name: str = Field(
         default="extracted_data.db", description="SQLite 数据库文件名"
+    )
+    database_url: str = Field(
+        default="",
+        description="主数据库 URL，支持 sqlite:/// 与 postgresql://",
+    )
+    task_store_database_url: str = Field(
+        default="",
+        description="任务元数据数据库 URL，未设置时回退到 database_url",
+    )
+    backup_dir: str = Field(
+        default=str(DEFAULT_OUTPUT_DIR / "backups"),
+        description="应用级数据库备份目录",
     )
     csv_encoding: str = Field(default="utf-8-sig", description="CSV 编码")
     sqlite_busy_timeout_ms: int = Field(
@@ -293,6 +318,45 @@ class WebConfig(BaseSettings):
     )
 
 
+class SecurityConfig(BaseSettings):
+    config_secret_key: str = Field(
+        default="",
+        description="用于加密 local.yaml 敏感配置的主密钥",
+    )
+    auth_secret_key: str = Field(
+        default="",
+        description="用于签发登录会话 token 的密钥",
+    )
+    bootstrap_admin_username: str = Field(
+        default="admin",
+        description="首个管理员账号名",
+    )
+    bootstrap_admin_password: str = Field(
+        default="",
+        description="首个管理员密码",
+    )
+    bootstrap_admin_display_name: str = Field(
+        default="System Admin",
+        description="首个管理员显示名",
+    )
+    default_tenant_id: str = Field(
+        default="default",
+        description="默认租户 ID",
+    )
+    session_ttl_hours: int = Field(
+        default=24,
+        description="登录会话有效期，单位小时",
+    )
+    export_allowed_roles: list[str] = Field(
+        default_factory=lambda: ["admin", "operator"],
+        description="允许导出任务结果的角色列表",
+    )
+    audit_log_enabled: bool = Field(
+        default=True,
+        description="是否启用审计日志",
+    )
+
+
 class AppConfig(BaseSettings):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     fetcher: FetcherConfig = Field(default_factory=FetcherConfig)
@@ -301,6 +365,7 @@ class AppConfig(BaseSettings):
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     log: LogConfig = Field(default_factory=LogConfig)
     web: WebConfig = Field(default_factory=WebConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
 
     @classmethod
     def from_yaml(
@@ -327,6 +392,7 @@ class AppConfig(BaseSettings):
         )
         env_fetcher_locale = os.environ.get("SMART_EXTRACTOR_FETCHER_LOCALE", "")
         env_fetcher_timezone = os.environ.get("SMART_EXTRACTOR_FETCHER_TIMEZONE_ID", "")
+        env_fetcher_proxy_url = os.environ.get("SMART_EXTRACTOR_FETCHER_PROXY_URL", "")
         env_fetcher_storage_state = os.environ.get(
             "SMART_EXTRACTOR_FETCHER_STORAGE_STATE_PATH", ""
         )
@@ -341,6 +407,15 @@ class AppConfig(BaseSettings):
         )
         env_storage_sqlite_synchronous = os.environ.get(
             "SMART_EXTRACTOR_STORAGE_SQLITE_SYNCHRONOUS", ""
+        )
+        env_storage_database_url = os.environ.get(
+            "SMART_EXTRACTOR_STORAGE_DATABASE_URL", ""
+        )
+        env_storage_task_store_database_url = os.environ.get(
+            "SMART_EXTRACTOR_STORAGE_TASK_STORE_DATABASE_URL", ""
+        )
+        env_storage_backup_dir = os.environ.get(
+            "SMART_EXTRACTOR_STORAGE_BACKUP_DIR", ""
         )
 
         env_web_token = os.environ.get("SMART_EXTRACTOR_WEB_API_TOKEN", "")
@@ -410,6 +485,33 @@ class AppConfig(BaseSettings):
         env_startup_check_timeout = os.environ.get(
             "SMART_EXTRACTOR_STARTUP_CHECK_TIMEOUT", ""
         )
+        env_security_config_secret_key = os.environ.get(
+            "SMART_EXTRACTOR_CONFIG_SECRET_KEY", ""
+        )
+        env_security_auth_secret_key = os.environ.get(
+            "SMART_EXTRACTOR_AUTH_SECRET_KEY", ""
+        )
+        env_security_bootstrap_admin_username = os.environ.get(
+            "SMART_EXTRACTOR_BOOTSTRAP_ADMIN_USERNAME", ""
+        )
+        env_security_bootstrap_admin_password = os.environ.get(
+            "SMART_EXTRACTOR_BOOTSTRAP_ADMIN_PASSWORD", ""
+        )
+        env_security_bootstrap_admin_display_name = os.environ.get(
+            "SMART_EXTRACTOR_BOOTSTRAP_ADMIN_DISPLAY_NAME", ""
+        )
+        env_security_default_tenant_id = os.environ.get(
+            "SMART_EXTRACTOR_DEFAULT_TENANT_ID", ""
+        )
+        env_security_session_ttl_hours = os.environ.get(
+            "SMART_EXTRACTOR_SESSION_TTL_HOURS", ""
+        )
+        env_security_export_allowed_roles = os.environ.get(
+            "SMART_EXTRACTOR_EXPORT_ALLOWED_ROLES", ""
+        )
+        env_security_audit_log_enabled = os.environ.get(
+            "SMART_EXTRACTOR_AUDIT_LOG_ENABLED", ""
+        )
 
         llm_data = merged_config.get("llm", {})
         if env_api_key:
@@ -418,6 +520,17 @@ class AppConfig(BaseSettings):
             llm_data["base_url"] = env_base_url
         if env_model:
             llm_data["model"] = env_model
+        config_secret_key = (
+            env_security_config_secret_key
+            or str(
+                merged_config.get("security", {}).get("config_secret_key", "")
+                if isinstance(merged_config.get("security"), dict)
+                else ""
+            )
+        )
+        encrypted_api_key = str(llm_data.get("api_key_encrypted", "") or "").strip()
+        if not env_api_key and encrypted_api_key and config_secret_key:
+            llm_data["api_key"] = decrypt_secret(config_secret_key, encrypted_api_key)
 
         fetcher_data = merged_config.get("fetcher", {})
         if env_fetcher_verify_ssl:
@@ -426,6 +539,8 @@ class AppConfig(BaseSettings):
             fetcher_data["locale"] = env_fetcher_locale
         if env_fetcher_timezone:
             fetcher_data["timezone_id"] = env_fetcher_timezone
+        if env_fetcher_proxy_url:
+            fetcher_data["proxy_url"] = env_fetcher_proxy_url
         if env_fetcher_storage_state:
             fetcher_data["storage_state_path"] = env_fetcher_storage_state
         if env_fetcher_persistent_context:
@@ -445,6 +560,12 @@ class AppConfig(BaseSettings):
             )
         if env_storage_sqlite_synchronous:
             storage_data["sqlite_synchronous"] = env_storage_sqlite_synchronous
+        if env_storage_database_url:
+            storage_data["database_url"] = env_storage_database_url
+        if env_storage_task_store_database_url:
+            storage_data["task_store_database_url"] = env_storage_task_store_database_url
+        if env_storage_backup_dir:
+            storage_data["backup_dir"] = env_storage_backup_dir
 
         web_data = merged_config.get("web", {})
         if env_web_token:
@@ -562,6 +683,41 @@ class AppConfig(BaseSettings):
             except ValueError:
                 pass
 
+        security_data = merged_config.get("security", {})
+        if env_security_config_secret_key:
+            security_data["config_secret_key"] = env_security_config_secret_key
+        if env_security_auth_secret_key:
+            security_data["auth_secret_key"] = env_security_auth_secret_key
+        if env_security_bootstrap_admin_username:
+            security_data["bootstrap_admin_username"] = (
+                env_security_bootstrap_admin_username
+            )
+        if env_security_bootstrap_admin_password:
+            security_data["bootstrap_admin_password"] = (
+                env_security_bootstrap_admin_password
+            )
+        if env_security_bootstrap_admin_display_name:
+            security_data["bootstrap_admin_display_name"] = (
+                env_security_bootstrap_admin_display_name
+            )
+        if env_security_default_tenant_id:
+            security_data["default_tenant_id"] = env_security_default_tenant_id
+        if env_security_session_ttl_hours:
+            try:
+                security_data["session_ttl_hours"] = int(
+                    env_security_session_ttl_hours
+                )
+            except ValueError:
+                pass
+        if env_security_export_allowed_roles:
+            security_data["export_allowed_roles"] = _parse_csv_list(
+                env_security_export_allowed_roles
+            )
+        if env_security_audit_log_enabled:
+            security_data["audit_log_enabled"] = _parse_bool(
+                env_security_audit_log_enabled
+            )
+
         return cls(
             llm=LLMConfig(**llm_data) if llm_data else LLMConfig(),
             fetcher=FetcherConfig(**fetcher_data),
@@ -570,6 +726,7 @@ class AppConfig(BaseSettings):
             scheduler=SchedulerConfig(**merged_config.get("scheduler", {})),
             log=LogConfig(**merged_config.get("log", {})),
             web=WebConfig(**web_data),
+            security=SecurityConfig(**security_data),
         )
 
 

@@ -71,6 +71,7 @@ class MonitorScheduler:
             claimer_id=self.scheduler_id,
             lease_seconds=self.lease_seconds,
             limit=self.batch_size,
+            tenant_id="*",
         )
         due_monitors = list(claim_summary.get("monitors") or [])
         failed_count = 0
@@ -83,6 +84,7 @@ class MonitorScheduler:
                     monitor.monitor_id,
                     "auto",
                     claimed_by=self.scheduler_id,
+                    tenant_id=monitor.tenant_id,
                 )
                 if task_id:
                     triggered_count += 1
@@ -98,6 +100,7 @@ class MonitorScheduler:
                     monitor.monitor_id,
                     error=last_error,
                     claimed_by=self.scheduler_id,
+                    tenant_id=monitor.tenant_id,
                 )
                 logger.exception("监控自动巡检触发失败: {}", monitor.monitor_id)
 

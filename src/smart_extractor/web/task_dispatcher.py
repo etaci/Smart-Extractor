@@ -14,6 +14,7 @@ class ExtractionTaskSpec:
     """描述一次网页提取任务的执行参数。"""
 
     task_id: str
+    tenant_id: str = ""
     schema_name: str = "auto"
     use_static: bool = False
     selected_fields: list[str] = field(default_factory=list)
@@ -25,6 +26,7 @@ class ExtractionTaskSpec:
 
     def to_queue_payload(self) -> dict[str, object]:
         return {
+            "tenant_id": self.tenant_id,
             "schema_name": self.schema_name,
             "use_static": self.use_static,
             "selected_fields": list(self.selected_fields or []),
@@ -42,6 +44,7 @@ class ExtractionTaskSpec:
         data = dict(payload or {})
         return cls(
             task_id=task_id,
+            tenant_id=str(data.get("tenant_id") or "").strip(),
             schema_name=str(data.get("schema_name") or "auto").strip() or "auto",
             use_static=bool(data.get("use_static", False)),
             selected_fields=[
@@ -60,6 +63,8 @@ class ExtractionTaskSpec:
             "schema_name": self.schema_name,
             "use_static": self.use_static,
         }
+        if self.tenant_id:
+            kwargs["tenant_id"] = self.tenant_id
         if self.selected_fields:
             kwargs["selected_fields"] = list(self.selected_fields)
         if self.monitor_id:
@@ -120,7 +125,7 @@ class QueuedTaskDispatcher:
     ) -> None:
         del background_tasks
         del runner
-        self._task_store.enqueue_task_spec(spec)
+        self._task_store.enqueue_task_spec(spec, tenant_id=spec.tenant_id)
 
 
 def build_task_dispatcher(*, task_store, dispatch_mode: str):

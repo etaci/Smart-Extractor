@@ -5,6 +5,7 @@ Web pages and REST API routes.
 from __future__ import annotations
 
 import threading
+from inspect import Parameter, signature
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +26,15 @@ from smart_extractor.web.analysis_routes import create_analysis_router
 from smart_extractor.web.api_models import (
     BatchExtractRequest,
     ExtractRequest,
+    LoginRequest,
+    TaskReviewRequest,
+)
+from smart_extractor.web.auth import AuthService, UserIdentity
+from smart_extractor.web.governance_store import (
+    GovernanceService,
+    create_audit_log,
+    fetch_audit_logs,
+    upsert_task_review,
 )
 from smart_extractor.web.management_routes import create_management_router
 from smart_extractor.web.monitor_scheduler import (
@@ -47,7 +57,6 @@ from smart_extractor.web.security import (
     ApiRateLimiter,
     collect_startup_diagnostics,
     collect_runtime_status,
-    enforce_api_token,
     resolve_client_key_with_trusted_proxies,
 )
 from smart_extractor.web.task_store import SQLiteTaskStore
@@ -71,12 +80,21 @@ from smart_extractor.web.template_market import (
     get_market_template,
     list_market_templates,
 )
+from smart_extractor.web.actor_market import (
+    get_actor_package,
+    list_actor_packages,
+)
 
 router = APIRouter()
 
 _app_config = load_config()
 _task_store = SQLiteTaskStore(
     Path(_app_config.storage.output_dir) / "web_tasks.db",
+    database_url=(
+        _app_config.storage.task_store_database_url
+        or _app_config.storage.database_url
+    ),
+    default_tenant_id=_app_config.security.default_tenant_id,
     sqlite_busy_timeout_ms=_app_config.storage.sqlite_busy_timeout_ms,
     sqlite_enable_wal=_app_config.storage.sqlite_enable_wal,
     sqlite_synchronous=_app_config.storage.sqlite_synchronous,
@@ -85,6 +103,16 @@ _learned_profile_store = LearnedProfileStore(
     Path(_app_config.storage.output_dir) / "learned_profiles.json"
 )
 _rate_limiter = ApiRateLimiter(_app_config.web.rate_limit_per_minute)
+_auth_service = AuthService(
+    connect=_task_store._connect,
+    lock=_task_store._lock,
+    config=_app_config,
+)
+_auth_service.ensure_bootstrap_admin()
+_governance_service = GovernanceService(
+    task_store=_task_store,
+    connect=_task_store._connect,
+)
 _task_dispatcher = build_task_dispatcher(
     task_store=_task_store,
     dispatch_mode=_app_config.web.task_dispatch_mode,
@@ -105,14 +133,65 @@ def _request_logger(request: Request, task_id: str = "-"):
     return logger.bind(request_id=_get_request_id(request), task_id=task_id)
 
 
-def _api_guard(request: Request) -> None:
-    enforce_api_token(request, _app_config.web.api_token)
+def _get_identity(request: Request) -> UserIdentity:
+    identity = getattr(request.state, "identity", None)
+    if isinstance(identity, UserIdentity):
+        return identity
+    return UserIdentity(
+        user_id="token-admin",
+        username="token-admin",
+        role="admin",
+        tenant_id=_app_config.security.default_tenant_id,
+        display_name="Token Admin",
+        auth_mode="token",
+    )
+
+
+def _audit(
+    request: Request,
+    *,
+    action: str,
+    resource_type: str,
+    resource_id: str = "",
+    payload: dict[str, object] | None = None,
+) -> None:
+    if not _app_config.security.audit_log_enabled:
+        return
+    identity = _get_identity(request)
+    create_audit_log(
+        lock=_task_store._lock,
+        connect=_task_store._connect,
+        tenant_id=identity.tenant_id,
+        actor_user_id=identity.user_id,
+        actor_role=identity.role,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        request_id=_get_request_id(request),
+        http_method=request.method,
+        path=request.url.path,
+        remote_addr=(
+            str(request.client.host).strip()
+            if request.client and request.client.host
+            else ""
+        ),
+        auth_mode=identity.auth_mode,
+        payload=payload,
+    )
+
+
+def _api_guard(request: Request) -> UserIdentity:
+    identity = _auth_service.authenticate_request(
+        request,
+        expected_api_token=_app_config.web.api_token,
+    )
     _rate_limiter.check(
         resolve_client_key_with_trusted_proxies(
             request,
             trusted_proxy_ips=_app_config.web.trusted_proxy_ips,
         )
     )
+    return identity
 
 
 def _build_extraction_task_spec(
@@ -121,12 +200,17 @@ def _build_extraction_task_spec(
     schema_name: str,
     storage_format: str,
     request_id: str,
+    tenant_id: str = "",
     use_static: bool = False,
     selected_fields: Optional[list[str]] = None,
     monitor_id: str = "",
     force_strategy: str = "",
     mode_label_override: str = "",
 ) -> ExtractionTaskSpec:
+    normalized_tenant_id = (
+        str(tenant_id or _app_config.security.default_tenant_id).strip()
+        or _app_config.security.default_tenant_id
+    )
     normalized_schema = str(schema_name or "auto").strip().lower() or "auto"
     mode_label = str(mode_label_override or "").strip()
     if not mode_label:
@@ -141,9 +225,11 @@ def _build_extraction_task_spec(
         mode_label,
         str(storage_format or "json").strip() or "json",
         request_id=request_id,
+        tenant_id=normalized_tenant_id,
     )
     return ExtractionTaskSpec(
         task_id=task.task_id,
+        tenant_id=normalized_tenant_id,
         schema_name=normalized_schema,
         use_static=use_static,
         selected_fields=list(selected_fields or []),
@@ -158,7 +244,7 @@ def _dispatch_extraction_task(
     background_tasks: BackgroundTasks | None = None,
 ) -> None:
     if str(_app_config.web.task_dispatch_mode or "").strip().lower() == "queue":
-        _task_store.enqueue_task_spec(spec)
+        _task_store.enqueue_task_spec(spec, tenant_id=spec.tenant_id)
         return
 
     if background_tasks is not None:
@@ -169,10 +255,25 @@ def _dispatch_extraction_task(
         )
         return
 
+    runner_signature = signature(_run_extraction)
+    supports_var_kwargs = any(
+        parameter.kind == Parameter.VAR_KEYWORD
+        for parameter in runner_signature.parameters.values()
+    )
+    runner_kwargs = (
+        spec.to_runner_kwargs()
+        if supports_var_kwargs
+        else {
+            key: value
+            for key, value in spec.to_runner_kwargs().items()
+            if key in runner_signature.parameters
+        }
+    )
+
     threading.Thread(
         target=_run_extraction,
         args=tuple(spec.to_runner_args()),
-        kwargs=spec.to_runner_kwargs(),
+        kwargs=runner_kwargs,
         name=f"smart-extractor-inline-{spec.task_id}",
         daemon=True,
     ).start()
@@ -184,6 +285,7 @@ def _create_background_extraction_task(
     schema_name: str,
     storage_format: str,
     request_id: str,
+    tenant_id: str = "",
     background_tasks: BackgroundTasks,
     use_static: bool = False,
     selected_fields: Optional[list[str]] = None,
@@ -197,6 +299,7 @@ def _create_background_extraction_task(
         schema_name=schema_name,
         storage_format=storage_format,
         request_id=request_id,
+        tenant_id=tenant_id,
         use_static=use_static,
         selected_fields=selected_fields,
         monitor_id=monitor_id,
@@ -209,6 +312,7 @@ def _create_background_extraction_task(
             monitor_id,
             task_id=spec.task_id,
             trigger_source=trigger_source,
+            tenant_id=spec.tenant_id,
         )
     return spec.task_id
 
@@ -219,8 +323,10 @@ def _trigger_monitor_run_with_state(
     *,
     claimed_by: str = "",
     request_id: str = "",
+    tenant_id: str = "",
 ) -> dict[str, object] | None:
-    monitor = _task_store.get_monitor(monitor_id)
+    normalized_tenant_id = str(tenant_id or _app_config.security.default_tenant_id).strip() or _app_config.security.default_tenant_id
+    monitor = _task_store.get_monitor(monitor_id, tenant_id=normalized_tenant_id)
     if monitor is None:
         return None
     normalized_claimed_by = str(claimed_by or "").strip()
@@ -228,7 +334,7 @@ def _trigger_monitor_run_with_state(
         raise RuntimeError(f"monitor claim lost: {monitor_id}")
     last_task_id = str(monitor.last_task_id or "").strip()
     if last_task_id:
-        last_task = _task_store.get(last_task_id)
+        last_task = _task_store.get(last_task_id, tenant_id=normalized_tenant_id)
         if last_task is not None and last_task.status in {"pending", "queued", "running"}:
             logger.info(
                 "Skip duplicate monitor trigger: monitor_id={} task_id={} trigger_source={}",
@@ -246,6 +352,7 @@ def _trigger_monitor_run_with_state(
         schema_name=monitor.schema_name,
         storage_format=monitor.storage_format,
         request_id=str(request_id or "").strip() or f"monitor-{trigger_source}",
+        tenant_id=normalized_tenant_id,
         use_static=monitor.use_static,
         selected_fields=list(monitor.selected_fields or []),
         monitor_id=monitor_id,
@@ -257,6 +364,7 @@ def _trigger_monitor_run_with_state(
         task_id=spec.task_id,
         trigger_source=trigger_source,
         claimed_by=normalized_claimed_by,
+        tenant_id=normalized_tenant_id,
     )
     return {
         "task_id": spec.task_id,
@@ -270,12 +378,14 @@ def trigger_monitor_run(
     *,
     claimed_by: str = "",
     request_id: str = "",
+    tenant_id: str = "",
 ) -> str | None:
     result = _trigger_monitor_run_with_state(
         monitor_id,
         trigger_source,
         claimed_by=claimed_by,
         request_id=request_id,
+        tenant_id=tenant_id,
     )
     if result is None:
         return None
@@ -370,6 +480,8 @@ router.include_router(
         update_llm_basic_config=update_llm_basic_config,
         collect_startup_diagnostics=collect_startup_diagnostics,
         collect_runtime_status=collect_runtime_status,
+        list_actor_packages=list_actor_packages,
+        get_actor_package=get_actor_package,
         list_market_templates=list_market_templates,
         get_market_template=get_market_template,
         create_background_extraction_task=_create_background_extraction_task,
@@ -464,6 +576,122 @@ async def readyz(request: Request):
     )
 
 
+@router.post("/api/auth/login")
+async def api_login(payload: LoginRequest, request: Request):
+    result = _auth_service.login(
+        username=payload.username.strip(),
+        password=payload.password,
+        tenant_id=payload.tenant_id.strip(),
+    )
+    request.state.identity = UserIdentity(
+        user_id=result["user"]["user_id"],
+        username=result["user"]["username"],
+        role=result["user"]["role"],
+        tenant_id=result["user"]["tenant_id"],
+        display_name=result["user"]["display_name"],
+        auth_mode="session",
+    )
+    _audit(
+        request,
+        action="auth.login",
+        resource_type="session",
+        resource_id=result["user"]["user_id"],
+        payload={"username": result["user"]["username"]},
+    )
+    return result
+
+
+@router.get("/api/auth/me")
+async def api_me(request: Request, identity: UserIdentity = Depends(_api_guard)):
+    return {
+        "user_id": identity.user_id,
+        "username": identity.username,
+        "role": identity.role,
+        "tenant_id": identity.tenant_id,
+        "display_name": identity.display_name,
+        "permissions": sorted(identity.permissions),
+        "auth_mode": identity.auth_mode,
+    }
+
+
+@router.get("/api/quality")
+async def api_quality_dashboard(
+    request: Request,
+    recent_limit: int = 200,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("dashboard:read")
+    payload = _governance_service.build_quality_dashboard(
+        tenant_id=identity.tenant_id,
+        recent_limit=max(20, min(int(recent_limit or 200), 500)),
+    )
+    return payload
+
+
+@router.get("/api/cost")
+async def api_cost_dashboard(
+    request: Request,
+    recent_limit: int = 200,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("dashboard:read")
+    payload = _governance_service.build_cost_dashboard(
+        tenant_id=identity.tenant_id,
+        recent_limit=max(20, min(int(recent_limit or 200), 500)),
+    )
+    return payload
+
+
+@router.get("/api/audit")
+async def api_audit_logs(
+    request: Request,
+    limit: int = 50,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("audit:read")
+    return {
+        "logs": fetch_audit_logs(
+            connect=_task_store._connect,
+            tenant_id=identity.tenant_id,
+            limit=max(1, min(int(limit or 50), 200)),
+        )
+    }
+
+
+@router.post("/api/task/{task_id}/review")
+async def api_task_review(
+    task_id: str,
+    payload: TaskReviewRequest,
+    request: Request,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("task:review")
+    task = _task_store.get(task_id, tenant_id=identity.tenant_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    review = upsert_task_review(
+        lock=_task_store._lock,
+        connect=_task_store._connect,
+        tenant_id=identity.tenant_id,
+        task_id=task_id,
+        reviewer_user_id=identity.user_id,
+        confirmed=payload.confirmed,
+        accuracy_score=payload.accuracy_score,
+        notes=payload.notes,
+    )
+    _audit(
+        request,
+        action="task.review",
+        resource_type="task",
+        resource_id=task_id,
+        payload={
+            "confirmed": payload.confirmed,
+            "accuracy_score": payload.accuracy_score,
+        },
+    )
+    return {"message": "人工复核结果已保存", "review": review}
+
+
 @router.get("/task/{task_id}", response_class=HTMLResponse)
 async def task_detail(request: Request, task_id: str):
     detail = _task_store.get_task_detail_payload(task_id)
@@ -484,8 +712,9 @@ async def api_extract(
     req: ExtractRequest,
     background_tasks: BackgroundTasks,
     request: Request,
-    _: None = Depends(_api_guard),
+    identity: UserIdentity = Depends(_api_guard),
 ):
+    identity.require("task:create")
     req_url = req.url.strip()
     if not req_url:
         raise HTTPException(status_code=400, detail="url 不能为空")
@@ -494,6 +723,7 @@ async def api_extract(
         schema_name=req.schema_name,
         storage_format=req.storage_format,
         request_id=_get_request_id(request),
+        tenant_id=identity.tenant_id,
         background_tasks=background_tasks,
         use_static=req.use_static,
         selected_fields=req.selected_fields,
@@ -519,8 +749,9 @@ async def api_batch(
     req: BatchExtractRequest,
     background_tasks: BackgroundTasks,
     request: Request,
-    _: None = Depends(_api_guard),
+    identity: UserIdentity = Depends(_api_guard),
 ):
+    identity.require("task:create")
     task_ids: list[str] = []
     normalized_schema = str(req.schema_name or "auto").strip().lower() or "auto"
     batch_group_id = (
@@ -532,6 +763,7 @@ async def api_batch(
         req.storage_format,
         request_id=_get_request_id(request),
         batch_group_id=batch_group_id,
+        tenant_id=identity.tenant_id,
     )
     for url in req.urls:
         task = _task_store.create(
@@ -541,12 +773,14 @@ async def api_batch(
             request_id=_get_request_id(request),
             batch_group_id=batch_group_id,
             parent_task_id=parent_task.task_id,
+            tenant_id=identity.tenant_id,
         )
         task_ids.append(task.task_id)
         _task_dispatcher.enqueue(
             background_tasks=background_tasks,
             spec=ExtractionTaskSpec(
                 task_id=task.task_id,
+                tenant_id=identity.tenant_id,
                 schema_name=normalized_schema,
                 use_static=False,
             ),
@@ -569,10 +803,15 @@ async def api_batch(
     }
 
 
-def _sync_monitor_notification(monitor_id: str, task_id: str) -> None:
+def _sync_monitor_notification(
+    monitor_id: str,
+    task_id: str,
+    tenant_id: str = "",
+) -> None:
     execute_monitor_notification(
         monitor_id=monitor_id,
         task_id=task_id,
+        tenant_id=tenant_id,
         task_store=_task_store,
         should_notify_fn=should_notify,
         send_monitor_notification_fn=send_monitor_notification,
@@ -581,19 +820,23 @@ def _sync_monitor_notification(monitor_id: str, task_id: str) -> None:
 
 def _run_extraction(
     task_id: str,
+    tenant_id: str = "",
     schema_name: str = "auto",
     use_static: bool = False,
     selected_fields: Optional[list[str]] = None,
     monitor_id: str = "",
     force_strategy: str = "",
+    worker_id: str = "",
 ):
     execute_extraction_task(
         task_id=task_id,
+        tenant_id=tenant_id,
         schema_name=schema_name,
         use_static=use_static,
         selected_fields=selected_fields,
         monitor_id=monitor_id,
         force_strategy=force_strategy,
+        worker_id=worker_id,
         task_store=_task_store,
         load_config_fn=load_config,
         sync_monitor_notification_fn=_sync_monitor_notification,

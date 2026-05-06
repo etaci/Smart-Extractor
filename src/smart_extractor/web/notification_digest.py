@@ -67,7 +67,10 @@ class NotificationDigestService:
         return snapshot
 
     def _list_due_target_configs(self, now: datetime) -> tuple[list[dict[str, Any]], int]:
-        monitors = self._task_store.list_monitors(limit=max(self.batch_size * 20, 200))
+        monitors = self._task_store.list_monitors(
+            limit=max(self.batch_size * 20, 200),
+            tenant_id="*",
+        )
         candidate_configs = collect_digest_target_configs(
             monitors=monitors,
             digest_enabled_only=True,
@@ -78,6 +81,7 @@ class NotificationDigestService:
 
         sent_today = {
             (
+                str(item.tenant_id or "").strip() or "default",
                 str(item.channel_type or "webhook").strip().lower() or "webhook",
                 str(item.target or "").strip(),
             )
@@ -85,6 +89,7 @@ class NotificationDigestService:
                 limit=500,
                 event_type="daily_digest",
                 created_after=_start_of_day(now),
+                tenant_id="*",
             )
             if str(item.target or "").strip()
         }
@@ -92,6 +97,7 @@ class NotificationDigestService:
         skipped_sent_today_count = 0
         for item in candidate_configs:
             target_key = (
+                str(item.get("tenant_id") or "").strip() or "default",
                 str(item.get("channel_type") or "webhook").strip().lower() or "webhook",
                 str(item.get("target") or "").strip(),
             )

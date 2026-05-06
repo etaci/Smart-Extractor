@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from loguru import logger
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
@@ -87,6 +88,26 @@ class PlaywrightFetcher(BaseFetcher):
             "--disable-features=IsolateOrigins,site-per-process",
         ]
 
+    def _build_proxy_options(self) -> dict[str, str] | None:
+        proxy_url = str(self._config.proxy_url or "").strip()
+        if not proxy_url:
+            return None
+        parts = urlsplit(proxy_url)
+        hostname = parts.hostname or ""
+        if not hostname:
+            return None
+        scheme = parts.scheme or "http"
+        server = f"{scheme}://{hostname}"
+        if parts.port:
+            server = f"{server}:{parts.port}"
+        payload = {"server": server}
+        if parts.username:
+            payload["username"] = parts.username
+        if parts.password:
+            payload["password"] = parts.password
+        logger.info("Playwright 抓取使用代理: {}", server)
+        return payload
+
     def _ensure_browser(self) -> Optional[Browser]:
         if self._initialized:
             return self._browser
@@ -96,6 +117,7 @@ class PlaywrightFetcher(BaseFetcher):
             self._playwright = sync_playwright().start()
         user_agent = self._config.user_agent or get_random_user_agent()
         persistent_dir = self._resolve_persistent_context_dir()
+        proxy_options = self._build_proxy_options()
 
         if persistent_dir:
             persistent_dir.mkdir(parents=True, exist_ok=True)
@@ -104,6 +126,7 @@ class PlaywrightFetcher(BaseFetcher):
                 user_data_dir=str(persistent_dir),
                 headless=self._config.headless,
                 args=self._build_launch_args(),
+                proxy=proxy_options,
                 **self._build_context_options(user_agent, include_storage_state=False),
             )
             self._context.add_init_script(_ANTI_DETECT_SCRIPT)
@@ -113,6 +136,7 @@ class PlaywrightFetcher(BaseFetcher):
             self._browser = self._playwright.chromium.launch(
                 headless=self._config.headless,
                 args=self._build_launch_args(),
+                proxy=proxy_options,
             )
 
         self._initialized = True
@@ -228,8 +252,9 @@ class PlaywrightFetcher(BaseFetcher):
         *,
         status_code: int = 0,
         headers: dict[str, str] | None = None,
-    ) -> None:
+    ) -> int:
         max_attempts = max(1, int(self._config.challenge_retry_attempts))
+        retry_count = 0
         for attempt in range(1, max_attempts + 1):
             self._wait_for_meaningful_content(page)
             if not self._looks_like_shell_page(page) and not self._looks_like_challenge_page(
@@ -237,21 +262,23 @@ class PlaywrightFetcher(BaseFetcher):
                 status_code=status_code,
                 headers=headers,
             ):
-                return
+                return retry_count
 
             if attempt >= max_attempts:
                 logger.warning("页面仍处于壳页或挑战页状态: {}", url)
-                return
+                return retry_count
 
             logger.info("检测到页面仍为壳页或挑战页，执行预热并重试: {} attempt={}", url, attempt + 1)
             self._warm_up_page(page)
             if self._config.challenge_retry_backoff_ms > 0:
                 page.wait_for_timeout(self._config.challenge_retry_backoff_ms)
             page.reload(timeout=self._config.timeout, wait_until="domcontentloaded")
+            retry_count += 1
             try:
                 page.wait_for_load_state("networkidle", timeout=min(self._config.timeout, 5000))
             except Exception:
                 logger.debug("页面重载后等待 networkidle 超时，继续处理")
+        return retry_count
 
     def fetch(self, url: str) -> FetchResult:
         start_time = time.time()
@@ -274,7 +301,12 @@ class PlaywrightFetcher(BaseFetcher):
             except Exception:
                 logger.debug("等待 networkidle 超时，继续处理")
 
-            self._stabilize_page(page, url, status_code=status_code, headers=headers)
+            retry_count = self._stabilize_page(
+                page,
+                url,
+                status_code=status_code,
+                headers=headers,
+            )
 
             if self._config.wait_after_load > 0:
                 page.wait_for_timeout(self._config.wait_after_load)
@@ -314,6 +346,7 @@ class PlaywrightFetcher(BaseFetcher):
                 headers=headers,
                 elapsed_ms=elapsed,
                 is_shell_page=is_shell_page,
+                retry_count=retry_count,
             )
         except Exception as exc:
             elapsed = (time.time() - start_time) * 1000
@@ -324,6 +357,7 @@ class PlaywrightFetcher(BaseFetcher):
                 status_code=0,
                 error=error_msg,
                 elapsed_ms=elapsed,
+                retry_count=0,
             )
         finally:
             if page:

@@ -1,15 +1,39 @@
-"""Template persistence helpers for SQLiteTaskStore."""
+"""Template persistence helpers for the task store."""
 
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import datetime
 from typing import Any, Callable
 
 from smart_extractor.web.task_models import TemplateRecord
 
-ConnectionFactory = Callable[[], sqlite3.Connection]
+ConnectionFactory = Callable[[], object]
+
+
+def _insert_template_row(conn, values: tuple[Any, ...]) -> int:
+    if getattr(conn, "dialect", "sqlite") == "postgres":
+        row = conn.execute(
+            """
+            INSERT INTO extraction_templates (
+                template_id, tenant_id, name, url, page_type, schema_name, storage_format,
+                use_static, selected_fields_json, field_labels_json, profile_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            values,
+        ).fetchone()
+        return int(row["id"] or 0)
+    cursor = conn.execute(
+        """
+        INSERT INTO extraction_templates (
+            template_id, tenant_id, name, url, page_type, schema_name, storage_format,
+            use_static, selected_fields_json, field_labels_json, profile_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        values,
+    )
+    return int(cursor.lastrowid or 0)
 
 
 def upsert_template(
@@ -26,6 +50,7 @@ def upsert_template(
     field_labels: dict[str, str],
     profile: dict[str, Any] | None = None,
     template_id: str = "",
+    tenant_id: str = "default",
 ) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     normalized_template_id = str(template_id or "").strip()
@@ -35,8 +60,8 @@ def upsert_template(
         with connect() as conn:
             if normalized_template_id:
                 existing = conn.execute(
-                    "SELECT id FROM extraction_templates WHERE template_id=?",
-                    (normalized_template_id,),
+                    "SELECT id FROM extraction_templates WHERE tenant_id=? AND template_id=?",
+                    (tenant_id, normalized_template_id),
                 ).fetchone()
                 if existing is not None:
                     conn.execute(
@@ -44,7 +69,7 @@ def upsert_template(
                         UPDATE extraction_templates
                         SET name=?, url=?, page_type=?, schema_name=?, storage_format=?,
                             use_static=?, selected_fields_json=?, field_labels_json=?, profile_json=?, updated_at=?
-                        WHERE template_id=?
+                        WHERE tenant_id=? AND template_id=?
                         """,
                         (
                             name,
@@ -57,6 +82,7 @@ def upsert_template(
                             json.dumps(field_labels, ensure_ascii=False),
                             json.dumps(normalized_profile, ensure_ascii=False),
                             now,
+                            tenant_id,
                             normalized_template_id,
                         ),
                     )
@@ -64,12 +90,13 @@ def upsert_template(
                     conn.execute(
                         """
                         INSERT INTO extraction_templates (
-                            template_id, name, url, page_type, schema_name, storage_format,
+                            template_id, tenant_id, name, url, page_type, schema_name, storage_format,
                             use_static, selected_fields_json, field_labels_json, profile_json, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             normalized_template_id,
+                            tenant_id,
                             name,
                             url,
                             page_type,
@@ -84,15 +111,11 @@ def upsert_template(
                         ),
                     )
             else:
-                row_id = conn.execute(
-                    """
-                    INSERT INTO extraction_templates (
-                        template_id, name, url, page_type, schema_name, storage_format,
-                        use_static, selected_fields_json, field_labels_json, profile_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+                row_id = _insert_template_row(
+                    conn,
                     (
                         "",
+                        tenant_id,
                         name,
                         url,
                         page_type,
@@ -105,7 +128,7 @@ def upsert_template(
                         now,
                         now,
                     ),
-                ).lastrowid
+                )
                 normalized_template_id = f"tpl-{int(row_id):06d}"
                 conn.execute(
                     "UPDATE extraction_templates SET template_id=? WHERE id=?",
@@ -120,11 +143,12 @@ def fetch_templates(
     *,
     connect: ConnectionFactory,
     limit: int = 20,
+    tenant_id: str = "default",
 ) -> list[TemplateRecord]:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM extraction_templates ORDER BY updated_at DESC, id DESC LIMIT ?",
-            (int(limit),),
+            "SELECT * FROM extraction_templates WHERE tenant_id=? ORDER BY updated_at DESC, id DESC LIMIT ?",
+            (tenant_id, int(limit)),
         ).fetchall()
     return [TemplateRecord.from_row(row) for row in rows]
 
@@ -133,11 +157,12 @@ def fetch_template(
     *,
     connect: ConnectionFactory,
     template_id: str,
+    tenant_id: str = "default",
 ) -> TemplateRecord | None:
     with connect() as conn:
         row = conn.execute(
-            "SELECT * FROM extraction_templates WHERE template_id=?",
-            (template_id,),
+            "SELECT * FROM extraction_templates WHERE tenant_id=? AND template_id=?",
+            (tenant_id, template_id),
         ).fetchone()
     if row is None:
         return None
@@ -149,12 +174,17 @@ def touch_template(
     lock: Any,
     connect: ConnectionFactory,
     template_id: str,
+    tenant_id: str = "default",
 ) -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with lock:
         with connect() as conn:
             conn.execute(
-                "UPDATE extraction_templates SET last_used_at=?, updated_at=? WHERE template_id=?",
-                (now, now, template_id),
+                """
+                UPDATE extraction_templates
+                SET last_used_at=?, updated_at=?, use_count=use_count+1
+                WHERE tenant_id=? AND template_id=?
+                """,
+                (now, now, tenant_id, template_id),
             )
             conn.commit()

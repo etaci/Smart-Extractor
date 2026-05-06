@@ -4,6 +4,7 @@ import asyncio
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from loguru import logger
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
@@ -71,6 +72,26 @@ class AsyncPlaywrightFetcher:
             "--disable-features=IsolateOrigins,site-per-process",
         ]
 
+    def _build_proxy_options(self) -> dict[str, str] | None:
+        proxy_url = str(self._config.proxy_url or "").strip()
+        if not proxy_url:
+            return None
+        parts = urlsplit(proxy_url)
+        hostname = parts.hostname or ""
+        if not hostname:
+            return None
+        scheme = parts.scheme or "http"
+        server = f"{scheme}://{hostname}"
+        if parts.port:
+            server = f"{server}:{parts.port}"
+        payload = {"server": server}
+        if parts.username:
+            payload["username"] = parts.username
+        if parts.password:
+            payload["password"] = parts.password
+        logger.info("Async Playwright 抓取使用代理: {}", server)
+        return payload
+
     async def _ensure_browser(self) -> None:
         if self._initialized:
             return
@@ -80,6 +101,7 @@ class AsyncPlaywrightFetcher:
             self._playwright = await async_playwright().start()
             user_agent = self._config.user_agent or get_random_user_agent()
             persistent_dir = self._resolve_persistent_context_dir()
+            proxy_options = self._build_proxy_options()
             if persistent_dir:
                 persistent_dir.mkdir(parents=True, exist_ok=True)
                 self._uses_persistent_context = True
@@ -87,6 +109,7 @@ class AsyncPlaywrightFetcher:
                     user_data_dir=str(persistent_dir),
                     headless=self._config.headless,
                     args=self._build_launch_args(),
+                    proxy=proxy_options,
                     **self._build_context_options(user_agent, include_storage_state=False),
                 )
                 await self._context.add_init_script(_ANTI_DETECT_SCRIPT)
@@ -95,6 +118,7 @@ class AsyncPlaywrightFetcher:
                 self._browser = await self._playwright.chromium.launch(
                     headless=self._config.headless,
                     args=self._build_launch_args(),
+                    proxy=proxy_options,
                 )
             self._initialized = True
 

@@ -55,6 +55,10 @@ class LearnedProfile:
     disabled_at: str = ""
     disabled_reason: str = ""
     last_matched_url: str = ""
+    manual_annotation_count: int = 0
+    auto_repair_count: int = 0
+    last_annotation_at: str = ""
+    last_repair_at: str = ""
     created_at: str = field(default_factory=_now_text)
     updated_at: str = field(default_factory=_now_text)
     last_used_at: str = ""
@@ -85,6 +89,10 @@ class LearnedProfile:
             disabled_at=str(payload.get("disabled_at") or ""),
             disabled_reason=str(payload.get("disabled_reason") or ""),
             last_matched_url=str(payload.get("last_matched_url") or ""),
+            manual_annotation_count=int(payload.get("manual_annotation_count") or 0),
+            auto_repair_count=int(payload.get("auto_repair_count") or 0),
+            last_annotation_at=str(payload.get("last_annotation_at") or ""),
+            last_repair_at=str(payload.get("last_repair_at") or ""),
             created_at=str(payload.get("created_at") or _now_text()),
             updated_at=str(payload.get("updated_at") or _now_text()),
             last_used_at=str(payload.get("last_used_at") or ""),
@@ -290,6 +298,61 @@ class LearnedProfileStore:
                 return False
             self._save_items([item.to_dict() for item in remaining])
         return True
+
+    def apply_manual_feedback(
+        self,
+        profile_id: str,
+        *,
+        selected_fields: list[str] | None = None,
+        field_labels: dict[str, str] | None = None,
+        sample_url: str = "",
+        repaired: bool = False,
+        reactivate: bool = True,
+    ) -> Optional[LearnedProfile]:
+        normalized_profile_id = str(profile_id or "").strip()
+        if not normalized_profile_id:
+            return None
+        now = _now_text()
+        with self._lock:
+            profiles = self.list_profiles()
+            target: LearnedProfile | None = None
+            for item in profiles:
+                if item.profile_id == normalized_profile_id:
+                    target = item
+                    break
+            if target is None:
+                return None
+
+            normalized_fields = _normalize_fields(selected_fields)
+            if normalized_fields:
+                target.selected_fields = normalized_fields
+            if isinstance(field_labels, dict):
+                target.field_labels = {
+                    **target.field_labels,
+                    **{
+                        str(key).strip(): str(value).strip()
+                        for key, value in field_labels.items()
+                        if str(key).strip()
+                    },
+                }
+            if str(sample_url or "").strip():
+                target.sample_url = str(sample_url).strip()
+                target.last_matched_url = str(sample_url).strip()
+                target.path_prefix = _path_prefix(sample_url)
+            target.manual_annotation_count += 1
+            target.last_annotation_at = now
+            if repaired:
+                target.auto_repair_count += 1
+                target.last_repair_at = now
+                target.rule_failure_count = 0
+                target.last_completeness = max(float(target.last_completeness or 0.0), 0.8)
+            if reactivate:
+                target.is_active = True
+                target.disabled_at = ""
+                target.disabled_reason = ""
+            target.updated_at = now
+            self._save_items([item.to_dict() for item in profiles])
+        return target
 
     def stats(self) -> dict[str, int]:
         profiles = self.list_profiles()

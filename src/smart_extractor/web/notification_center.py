@@ -24,11 +24,13 @@ def _collect_digest_events(
     task_store,
     window_hours: int = 24,
     now: datetime | None = None,
+    tenant_id: str = "",
 ) -> list[Any]:
     reference_time = now or datetime.now()
     return task_store.list_notification_events(
         limit=500,
         created_after=_window_start(now=reference_time, window_hours=window_hours),
+        tenant_id=tenant_id,
     )
 
 
@@ -54,8 +56,9 @@ def collect_digest_target_configs(
     digest_enabled_only: bool = False,
     due_hour: int | None = None,
 ) -> list[dict[str, Any]]:
-    target_map: dict[tuple[str, str], dict[str, Any]] = {}
+    target_map: dict[tuple[str, str, str], dict[str, Any]] = {}
     for monitor in monitors:
+        tenant_id = str(getattr(monitor, "tenant_id", "") or "").strip() or "default"
         profile = monitor.profile if isinstance(monitor.profile, dict) else {}
         digest_enabled = bool(profile.get("digest_enabled"))
         if digest_enabled_only and not digest_enabled:
@@ -77,8 +80,9 @@ def collect_digest_target_configs(
                 continue
 
             config = target_map.setdefault(
-                (channel_type, target),
+                (tenant_id, channel_type, target),
                 {
+                    "tenant_id": tenant_id,
                     "channel_type": channel_type,
                     "target": target,
                     "secret": "",
@@ -105,18 +109,20 @@ def collect_digest_target_configs(
 def _normalize_target_configs(
     target_configs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    normalized_configs: dict[tuple[str, str], dict[str, Any]] = {}
+    normalized_configs: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in target_configs or []:
         if not isinstance(item, dict):
             continue
+        tenant_id = str(item.get("tenant_id") or "").strip() or "default"
         target = str(item.get("target") or "").strip()
         channel_type = str(item.get("channel_type") or "webhook").strip().lower() or "webhook"
         if not target:
             continue
-        key = (channel_type, target)
+        key = (tenant_id, channel_type, target)
         config = normalized_configs.setdefault(
             key,
             {
+                "tenant_id": tenant_id,
                 "channel_type": channel_type,
                 "target": target,
                 "secret": "",
@@ -147,13 +153,14 @@ def dispatch_notification_attempt(
     triggered_by: str,
     reason: str = "",
 ) -> Any:
+    tenant_id = str(getattr(source_event, "tenant_id", "") or "").strip()
     monitor = (
-        task_store.get_monitor(source_event.monitor_id)
+        task_store.get_monitor(source_event.monitor_id, tenant_id=tenant_id)
         if str(source_event.monitor_id or "").strip()
         else None
     )
     task = (
-        task_store.get(source_event.task_id)
+        task_store.get(source_event.task_id, tenant_id=tenant_id)
         if str(source_event.task_id or "").strip()
         else None
     )
@@ -223,6 +230,7 @@ def dispatch_notification_attempt(
         sent_at=result.sent_at,
         retry_of_notification_id=source_event.notification_id,
         triggered_by=triggered_by,
+        tenant_id=tenant_id,
     )
     source_message = (
         f"已转入第 {retry_event.attempt_no} 次尝试"
@@ -234,12 +242,14 @@ def dispatch_notification_attempt(
             status="retried",
             status_message=source_message,
             next_retry_at="",
+            tenant_id=tenant_id,
         )
     if str(source_event.monitor_id or "").strip():
         task_store.update_monitor_notification(
             source_event.monitor_id,
             status=retry_event.status,
             message=retry_event.status_message,
+            tenant_id=tenant_id,
         )
     return retry_event
 
@@ -251,6 +261,7 @@ def build_notification_digest(
     now: datetime | None = None,
     monitor_ids: list[str] | None = None,
     targets: list[str] | None = None,
+    tenant_id: str = "",
 ) -> dict[str, Any]:
     reference_time = now or datetime.now()
     selected_monitor_ids = _normalize_monitor_ids(monitor_ids)
@@ -259,8 +270,12 @@ def build_notification_digest(
         task_store=task_store,
         window_hours=window_hours,
         now=reference_time,
+        tenant_id=tenant_id,
     )
-    monitors = {item.monitor_id: item for item in task_store.list_monitors(limit=200)}
+    monitors = {
+        item.monitor_id: item
+        for item in task_store.list_monitors(limit=200, tenant_id=tenant_id)
+    }
     if selected_monitor_ids:
         monitors = {
             monitor_id: monitor
@@ -416,14 +431,18 @@ def dispatch_digest_notifications(
     window_hours: int = 24,
     target_configs: list[dict[str, Any]] | None = None,
     now: datetime | None = None,
+    tenant_id: str = "",
 ) -> list[Any]:
-    monitors = task_store.list_monitors(limit=200)
+    monitors = task_store.list_monitors(limit=200, tenant_id=tenant_id or "*")
     normalized_target_configs = _normalize_target_configs(target_configs)
     if not normalized_target_configs:
         normalized_target_configs = collect_digest_target_configs(monitors=monitors)
 
     events = []
     for target_config in normalized_target_configs:
+        config_tenant_id = str(target_config.get("tenant_id") or tenant_id or "").strip()
+        if not config_tenant_id:
+            config_tenant_id = "default"
         target = str(target_config.get("target") or "").strip()
         channel_type = (
             str(target_config.get("channel_type") or "webhook").strip().lower()
@@ -437,6 +456,7 @@ def dispatch_digest_notifications(
             now=now,
             monitor_ids=list(target_config.get("monitor_ids") or []),
             targets=[target],
+            tenant_id=config_tenant_id,
         )
         digest_payload = build_notification_digest_payload(digest=digest)
         result = normalize_delivery_result(
@@ -474,6 +494,7 @@ def dispatch_digest_notifications(
                 payload_snapshot=result.payload_snapshot,
                 sent_at=result.sent_at,
                 triggered_by="system",
+                tenant_id=config_tenant_id,
             )
         )
     return events

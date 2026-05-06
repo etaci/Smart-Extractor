@@ -21,6 +21,7 @@ class FetchResult(BaseModel):
     error: Optional[str] = Field(default=None, description="错误信息（如果抓取失败）")
     elapsed_ms: float = Field(default=0.0, description="耗时（毫秒）")
     is_shell_page: bool = Field(default=False, description="是否疑似前端壳页")
+    retry_count: int = Field(default=0, description="抓取阶段额外重试次数")
 
     @property
     def is_success(self) -> bool:

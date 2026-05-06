@@ -1,9 +1,9 @@
-"""Web 队列任务 worker。"""
+"""Web queue worker support."""
 
 from __future__ import annotations
 
 import threading
-import time
+from inspect import Parameter, signature
 from typing import Callable
 from uuid import uuid4
 
@@ -13,7 +13,7 @@ from smart_extractor.web.task_dispatcher import ExtractionTaskSpec
 
 
 class SQLiteTaskWorker:
-    """从 SQLite 队列领取任务并执行。"""
+    """Consume queued extraction tasks from the shared task store."""
 
     def __init__(
         self,
@@ -28,10 +28,25 @@ class SQLiteTaskWorker:
         self.worker_id = str(worker_id or f"worker-{uuid4().hex[:8]}")
         self.stale_after_seconds = max(float(stale_after_seconds), 0.0)
 
+    def _heartbeat(self, *, status: str, current_load: int, last_error: str = "") -> None:
+        self._task_store.heartbeat_worker_node(
+            worker_id=self.worker_id,
+            display_name=self.worker_id,
+            status=status,
+            queue_scope="*",
+            current_load=max(int(current_load or 0), 0),
+            capabilities=["extract", "queue"],
+            metadata={"runner": "sqlite-task-worker"},
+            last_error=last_error,
+            tenant_id="default",
+        )
+
     def run_once(self) -> bool:
+        self._heartbeat(status="idle", current_load=0)
         claimed = self._task_store.claim_next_queued_task(
             worker_id=self.worker_id,
             stale_after_seconds=self.stale_after_seconds,
+            tenant_id="*",
         )
         if not claimed:
             return False
@@ -42,14 +57,29 @@ class SQLiteTaskWorker:
             payload=payload,
         )
         try:
-            self._runner(*spec.to_runner_args(), **spec.to_runner_kwargs())
-            self._task_store.mark_queue_done(task.task_id)
+            self._heartbeat(status="busy", current_load=1)
+            runner_kwargs = dict(spec.to_runner_kwargs())
+            runner_signature = signature(self._runner)
+            supports_var_kwargs = any(
+                parameter.kind == Parameter.VAR_KEYWORD
+                for parameter in runner_signature.parameters.values()
+            )
+            if supports_var_kwargs or "worker_id" in runner_signature.parameters:
+                runner_kwargs["worker_id"] = self.worker_id
+            self._runner(*spec.to_runner_args(), **runner_kwargs)
+            self._task_store.mark_queue_done(task.task_id, tenant_id=task.tenant_id)
         except Exception as exc:
             self._task_store.mark_queue_failed(
                 task.task_id,
                 f"{type(exc).__name__}: {exc}",
+                tenant_id=task.tenant_id,
             )
-            logger.exception("队列 worker 执行任务崩溃: {}", task.task_id)
+            self._heartbeat(
+                status="degraded",
+                current_load=0,
+                last_error=f"{type(exc).__name__}: {exc}",
+            )
+            logger.exception("Queue worker crashed on task: {}", task.task_id)
         return True
 
     def run_forever(
@@ -60,7 +90,8 @@ class SQLiteTaskWorker:
     ) -> None:
         interval = max(float(poll_interval_seconds), 0.2)
         external_stop_event = stop_event or threading.Event()
-        logger.info("队列 worker 启动: {}", self.worker_id)
+        logger.info("Queue worker started: {}", self.worker_id)
+        self._heartbeat(status="starting", current_load=0)
         try:
             while not external_stop_event.is_set():
                 processed = self.run_once()
@@ -68,11 +99,12 @@ class SQLiteTaskWorker:
                     continue
                 external_stop_event.wait(interval)
         finally:
-            logger.info("队列 worker 停止: {}", self.worker_id)
+            self._heartbeat(status="offline", current_load=0)
+            logger.info("Queue worker stopped: {}", self.worker_id)
 
 
 class ManagedTaskWorkerThread:
-    """用于应用内启动/停止内置 worker 线程。"""
+    """Lifecycle wrapper for the built-in task worker thread."""
 
     def __init__(
         self,
