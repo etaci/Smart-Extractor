@@ -11,6 +11,29 @@ from loguru import logger
 from smart_extractor.web.monitor_schedule import current_timestamp
 
 
+def _trigger_with_optional_tenant(
+    trigger_monitor_run: Callable[..., str | None],
+    monitor,
+    *,
+    scheduler_id: str,
+) -> str | None:
+    try:
+        return trigger_monitor_run(
+            monitor.monitor_id,
+            "auto",
+            claimed_by=scheduler_id,
+            tenant_id=monitor.tenant_id,
+        )
+    except TypeError as exc:
+        if "tenant_id" not in str(exc):
+            raise
+        return trigger_monitor_run(
+            monitor.monitor_id,
+            "auto",
+            claimed_by=scheduler_id,
+        )
+
+
 class MonitorScheduler:
     """按调度周期触发监控巡检。"""
 
@@ -80,11 +103,10 @@ class MonitorScheduler:
 
         for monitor in due_monitors:
             try:
-                task_id = self._trigger_monitor_run(
-                    monitor.monitor_id,
-                    "auto",
-                    claimed_by=self.scheduler_id,
-                    tenant_id=monitor.tenant_id,
+                task_id = _trigger_with_optional_tenant(
+                    self._trigger_monitor_run,
+                    monitor,
+                    scheduler_id=self.scheduler_id,
                 )
                 if task_id:
                     triggered_count += 1

@@ -2,7 +2,9 @@
 
 const {
   getApiToken,
+  getSessionToken,
   setApiToken,
+  setSessionToken,
   getAuthHeaders,
   showToast,
   initTheme,
@@ -17,6 +19,8 @@ const STATUS_LABELS = {
 };
 
 let authErrorNotified = false;
+let dashboardStarted = false;
+let activeAuthMode = "register";
 let lastRateLimitToastAt = 0;
 let selectedFieldState = [];
 let latestAnalyzedFields = [];
@@ -634,6 +638,148 @@ function resetApiTokenState(token) {
   authErrorNotified = false;
 }
 
+function setLoginResult(message, type) {
+  const result = document.getElementById("login-result");
+  if (!result) return;
+  result.className = `submit-result ${type}`;
+  result.textContent = message;
+  result.style.display = "inline-flex";
+}
+
+function applyLoggedInState(user) {
+  const screen = document.getElementById("login-screen");
+  if (screen) {
+    screen.classList.add("login-screen-hidden");
+    screen.setAttribute("aria-hidden", "true");
+  }
+  document.body.classList.remove("auth-login");
+  document.body.classList.add("is-authenticated");
+  if (window.location.hash !== "#home") {
+    window.history.replaceState(null, "", `${window.location.pathname}#home`);
+  }
+  if (user && user.username) {
+    showToast(`已登录：${user.display_name || user.username}`, "success");
+  }
+}
+
+function showLoginState(message = "") {
+  const screen = document.getElementById("login-screen");
+  if (screen) {
+    screen.classList.remove("login-screen-hidden");
+    screen.removeAttribute("aria-hidden");
+  }
+  document.body.classList.add("auth-login");
+  document.body.classList.remove("is-authenticated");
+  if (window.location.hash !== "#login") {
+    window.history.replaceState(null, "", `${window.location.pathname}#login`);
+  }
+  if (message) {
+    setLoginResult(message, "error");
+  }
+}
+
+function syncLoginSubmitState() {
+  const button = document.getElementById("login-submit-btn");
+  const username = document.getElementById("login-username")?.value.trim() || "";
+  const password = document.getElementById("login-password")?.value || "";
+  if (button) {
+    button.disabled = !username || !password;
+    button.textContent =
+      activeAuthMode === "register" ? "注册并进入系统" : "登录进入系统";
+  }
+}
+
+function setAuthMode(mode) {
+  activeAuthMode = mode === "login" ? "login" : "register";
+  document.querySelectorAll("[data-auth-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.authMode === activeAuthMode);
+  });
+  const usernameInput = document.getElementById("login-username");
+  const passwordInput = document.getElementById("login-password");
+  if (usernameInput) {
+    usernameInput.placeholder =
+      activeAuthMode === "register" ? "请输入新账号" : "请输入账号";
+  }
+  if (passwordInput) {
+    passwordInput.placeholder =
+      activeAuthMode === "register" ? "请设置密码" : "请输入密码";
+  }
+  const result = document.getElementById("login-result");
+  if (result) {
+    result.style.display = "none";
+  }
+  syncLoginSubmitState();
+}
+
+async function verifyLoginState() {
+  if (!getSessionToken()) {
+    showLoginState();
+    return false;
+  }
+  const data = await fetchJsonOrNull("/api/auth/me", { suppressRateLimitToast: true });
+  if (data && data.username) {
+    applyLoggedInState(data);
+    startAuthenticatedDashboard();
+    return true;
+  }
+  setSessionToken("");
+  showLoginState("登录已过期，请重新登录");
+  return false;
+}
+
+async function submitLogin(event) {
+  event.preventDefault();
+  const button = document.getElementById("login-submit-btn");
+  const payload = {
+    tenant_id: document.getElementById("login-tenant")?.value.trim() || "",
+    username: document.getElementById("login-username")?.value.trim() || "",
+    password: document.getElementById("login-password")?.value || "",
+  };
+  if (!payload.username || !payload.password) {
+    setLoginResult("请填写账号和密码", "error");
+    syncLoginSubmitState();
+    return;
+  }
+  button.disabled = true;
+  button.innerHTML =
+    activeAuthMode === "register"
+      ? '<span class="spinner"></span>注册中'
+      : '<span class="spinner"></span>登录中';
+  try {
+    const endpoint =
+      activeAuthMode === "register" ? "/api/auth/register" : "/api/auth/login";
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...payload,
+        display_name: payload.username,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || "登录失败");
+    }
+    setSessionToken(data.access_token || "");
+    authErrorNotified = false;
+    setLoginResult(
+      activeAuthMode === "register"
+        ? "注册成功，正在进入工作台"
+        : "登录成功，正在进入工作台",
+      "success"
+    );
+    applyLoggedInState(data.user || { username: payload.username });
+    startAuthenticatedDashboard();
+  } catch (error) {
+    const action = activeAuthMode === "register" ? "注册" : "登录";
+    setLoginResult(error.message || `${action}失败`, "error");
+    showToast(`${action}失败：${error.message}`, "error");
+  } finally {
+    button.disabled = false;
+    syncLoginSubmitState();
+  }
+}
+
 async function apiFetch(url, options = {}) {
   const opts = { ...options };
   const suppressRateLimitToast = Boolean(opts.suppressRateLimitToast);
@@ -642,7 +788,11 @@ async function apiFetch(url, options = {}) {
   const response = await fetch(url, opts);
   if (response.status === 401 && !authErrorNotified) {
     authErrorNotified = true;
-    showToast("鉴权失败，请检查 API Token", "error");
+    showToast("鉴权失败，请重新登录或检查 API Token", "error");
+    if (!getApiToken()) {
+      setSessionToken("");
+      showLoginState("鉴权失败，请重新登录");
+    }
   } else if (response.status === 429) {
     const now = Date.now();
     if (!suppressRateLimitToast && now - lastRateLimitToastAt >= RATE_LIMIT_TOAST_COOLDOWN_MS) {
@@ -841,7 +991,7 @@ function scheduleDashboardRefresh() {
 }
 
 function showSection(name) {
-  const sections = ["overview", "extract", "analyzer", "tasks", "assets"];
+  const sections = ["overview", "extract", "analyzer", "tasks", "assets", "ops-assets", "backoffice"];
   document.body.dataset.activeSection = sections.includes(name) ? name : "overview";
   document.querySelectorAll(".nav-item").forEach((item) => {
     item.classList.toggle("active", item.dataset.section === name);
@@ -868,6 +1018,127 @@ function escHtml(value) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function compactValue(value) {
+  if (Array.isArray(value)) return `${value.length} 项`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value);
+    return keys.length ? keys.slice(0, 4).join("、") : "空对象";
+  }
+  if (value == null || value === "") return "-";
+  return String(value);
+}
+
+function renderObjectCards(containerId, title, payload) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const data = payload && typeof payload === "object" ? payload : {};
+  const entries = Object.entries(data).slice(0, 8);
+  container.innerHTML = `
+    <div class="insight-item emphasis">
+      <span class="insight-title">${escHtml(title)}</span>
+      <p>已收到后端结果，可继续点击按钮刷新最新数据。</p>
+    </div>
+    ${
+      entries.length
+        ? entries
+            .map(
+              ([key, value]) => `
+                <div class="insight-item">
+                  <span class="insight-title">${escHtml(key)}</span>
+                  <p>${escHtml(compactValue(value))}</p>
+                </div>
+              `
+            )
+            .join("")
+        : '<div class="insight-item"><span class="insight-title">暂无数据</span><p>接口返回为空。</p></div>'
+    }
+  `;
+}
+
+async function loadGovernance(kind) {
+  const endpoints = {
+    quality: ["/api/quality", "质量看板"],
+    cost: ["/api/cost", "成本看板"],
+    audit: ["/api/audit?limit=20", "审计日志"],
+    review: ["/api/annotations?limit=20", "人工复核"],
+  };
+  const [url, title] = endpoints[kind] || endpoints.quality;
+  const data = await fetchJsonOrNull(url);
+  if (!data) {
+    renderObjectCards("governance-result", title, { 状态: "读取失败，请检查权限或后端状态" });
+    showToast(`${title}读取失败`, "error");
+    return;
+  }
+  renderObjectCards("governance-result", title, data);
+  showToast(`${title}已刷新`, "success");
+}
+
+async function loadRuntimeOps() {
+  const [workers, proxies, policies] = await Promise.all([
+    fetchJsonOrNull("/api/workers"),
+    fetchJsonOrNull("/api/proxies"),
+    fetchJsonOrNull("/api/site_policies"),
+  ]);
+  renderObjectCards("monitor-center-result", "运行治理", {
+    Workers: workers?.workers || workers || [],
+    Proxies: proxies?.proxies || proxies || [],
+    "Site Policies": policies?.policies || policies || [],
+  });
+  showToast("运行治理数据已刷新", "success");
+}
+
+async function loadAnnotations() {
+  const data = await fetchJsonOrNull("/api/annotations?limit=20");
+  if (!data) {
+    renderObjectCards("monitor-center-result", "人工标注 + 自动修复闭环", { 状态: "读取失败" });
+    showToast("人工标注数据读取失败", "error");
+    return;
+  }
+  renderObjectCards("monitor-center-result", "人工标注 + 自动修复闭环", data);
+  showToast("人工标注闭环数据已刷新", "success");
+}
+
+async function loadBackofficeSummary() {
+  const data = await fetchJsonOrNull("/api/dashboard?task_limit=8&notification_limit=8");
+  if (!data) {
+    renderObjectCards("backoffice-summary-board", "统一后台工作台", { 状态: "读取失败" });
+    showToast("后台总览读取失败", "error");
+    return;
+  }
+  renderObjectCards("backoffice-summary-board", "统一后台工作台", {
+    任务: data.tasks || [],
+    模板: data.templates || [],
+    Actor: data.actors || data.installed_actors || [],
+    监控: data.monitors || [],
+    通知: data.notifications || [],
+    运行状态: data.runtime_status || {},
+    漏斗: data.funnel || data.insights || {},
+    "Learned Profiles": data.learned_profiles || [],
+  });
+  showToast("后台总览已刷新", "success");
+}
+
+function renderBackofficeSnapshot(stats, tasks, insights) {
+  renderObjectCards("backoffice-summary-board", "统一后台工作台", {
+    任务总数: stats?.total ?? 0,
+    成功任务: stats?.success ?? 0,
+    运行中: stats?.running ?? 0,
+    活跃监控: insights?.summary?.active_monitors ?? 0,
+    高优提醒: insights?.summary?.high_priority_alerts ?? 0,
+    最近任务: tasks || [],
+    漏斗与站点记忆: insights?.summary || {},
+  });
+}
+
+function renderMonitorCenterSnapshot(runtimeStatus) {
+  renderObjectCards("monitor-center-result", "监控中心能力", {
+    监控与通知中心: "已接入监控列表、告警概览、通知历史、失败补发和摘要发送",
+    运行治理: "可查看 Workers、代理池、站点策略；点击按钮会读取实时接口",
+    "人工标注 + 自动修复闭环": "可读取标注队列，后续回写模板和 learned profile",
+    运行状态: runtimeStatus || {},
+  });
 }
 
 function parsePercent(value) {
@@ -1957,6 +2228,21 @@ function finishAnalyzeProgress(text) {
 
 
 function bindEvents() {
+  const loginForm = document.getElementById("login-form");
+  if (loginForm) {
+    loginForm.addEventListener("submit", submitLogin);
+  }
+  ["login-username", "login-password"].forEach((id) => {
+    const input = document.getElementById(id);
+    if (input) {
+      input.addEventListener("input", syncLoginSubmitState);
+    }
+  });
+  document.querySelectorAll("[data-auth-mode]").forEach((button) => {
+    button.addEventListener("click", () => setAuthMode(button.dataset.authMode));
+  });
+  setAuthMode("register");
+
   document.querySelectorAll(".nav-item[data-section]").forEach((item) => {
     item.addEventListener("click", () => {
       showSection(item.dataset.section);
@@ -2243,6 +2529,17 @@ function bindEvents() {
   if (refreshBasicConfigButton) {
     refreshBasicConfigButton.addEventListener("click", () => loadBasicConfig(true));
   }
+
+  document.getElementById("load-quality-btn")?.addEventListener("click", () => loadGovernance("quality"));
+  document.getElementById("load-cost-btn")?.addEventListener("click", () => loadGovernance("cost"));
+  document.getElementById("load-audit-btn")?.addEventListener("click", () => loadGovernance("audit"));
+  document.getElementById("load-review-btn")?.addEventListener("click", () => loadGovernance("review"));
+  document.getElementById("load-runtime-ops-btn")?.addEventListener("click", loadRuntimeOps);
+  document.getElementById("load-annotations-btn")?.addEventListener("click", loadAnnotations);
+  document.getElementById("backoffice-refresh-btn")?.addEventListener("click", loadBackofficeSummary);
+  document.getElementById("actor-market-refresh-btn")?.addEventListener("click", () => {
+    dashboardAssetsModule.loadActorAssets(true);
+  });
 }
 
 async function submitExtract(event) {
@@ -2259,6 +2556,16 @@ function applyDashboardPayload(stats, tasks, insights) {
 
 async function refreshDashboard(options = {}) {
   return dashboardTaskRuntime.refreshDashboard(options);
+}
+
+function startAuthenticatedDashboard() {
+  if (dashboardStarted) {
+    return;
+  }
+  dashboardStarted = true;
+  refreshDashboard();
+  dashboardAssetsModule.loadActorAssets();
+  scheduleDashboardRefresh();
 }
 
 function initDashboard() {
@@ -2315,14 +2622,17 @@ function initDashboard() {
   updateBatchSummary();
   dashboardAssetsModule.renderTemplateBoard([]);
   dashboardAssetsModule.renderMarketTemplateBoard([]);
+  dashboardAssetsModule.renderActorMarketBoard([]);
+  dashboardAssetsModule.renderInstalledActorBoard([]);
   dashboardAssetsModule.renderMonitorBoard([]);
   dashboardAssetsModule.renderNotificationBoard([]);
   learnedProfilesModule.renderLearnedProfileSummary([], []);
   learnedProfilesModule.renderLearnedProfileBoard([]);
   dashboardAssetsModule.renderMonitorAlerts(initialInsights);
+  renderBackofficeSnapshot(initialStats, initialTasks, initialInsights);
+  renderMonitorCenterSnapshot(runtimeStatus);
   dashboardAnalysis.renderNlTaskPreview(null);
-  refreshDashboard();
-  scheduleDashboardRefresh();
+  verifyLoginState();
 }
 
 document.addEventListener("DOMContentLoaded", initDashboard);

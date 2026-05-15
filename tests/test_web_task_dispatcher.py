@@ -4,6 +4,7 @@ from smart_extractor.web.task_dispatcher import (
     ExtractionTaskSpec,
     InlineBackgroundTaskDispatcher,
     QueuedTaskDispatcher,
+    RedisQueuedTaskDispatcher,
     build_task_dispatcher,
 )
 
@@ -101,3 +102,48 @@ def test_build_task_dispatcher_returns_queue_dispatcher_when_enabled():
     dispatcher = build_task_dispatcher(task_store=object(), dispatch_mode="queue")
 
     assert isinstance(dispatcher, QueuedTaskDispatcher)
+
+
+def test_redis_task_dispatcher_enqueues_scope_and_marks_queued():
+    recorded = {}
+
+    class DummyTaskStore:
+        def mark_queued(self, task_id, tenant_id=""):
+            recorded["task_id"] = task_id
+            recorded["tenant_id"] = tenant_id
+
+    class DummyRedisQueue:
+        def enqueue(self, **kwargs):
+            recorded["payload"] = kwargs
+
+    dispatcher = RedisQueuedTaskDispatcher(DummyTaskStore(), DummyRedisQueue())
+    spec = ExtractionTaskSpec(
+        task_id="task-redis-1",
+        tenant_id="tenant-a",
+        schema_name="auto",
+        queue_scope="group-a",
+        isolation_key="tenant:tenant-a:domain:example.com:monitor:-",
+        site_domain="example.com",
+        dispatch_backend="redis",
+    )
+
+    dispatcher.enqueue(
+        background_tasks=BackgroundTasks(),
+        spec=spec,
+        runner=lambda *args, **kwargs: None,
+    )
+
+    assert recorded["task_id"] == "task-redis-1"
+    assert recorded["tenant_id"] == "tenant-a"
+    assert recorded["payload"]["queue_scope"] == "group-a"
+    assert recorded["payload"]["isolation_key"].startswith("tenant:tenant-a")
+
+
+def test_build_task_dispatcher_returns_redis_dispatcher_when_enabled():
+    dispatcher = build_task_dispatcher(
+        task_store=object(),
+        dispatch_mode="redis",
+        redis_queue=object(),
+    )
+
+    assert isinstance(dispatcher, RedisQueuedTaskDispatcher)

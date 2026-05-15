@@ -225,6 +225,15 @@ def collect_startup_diagnostics(config: AppConfig) -> dict[str, object]:
     if not config.security.config_secret_key.strip():
         warnings.append("未配置 config_secret_key，本地 API Key 将以明文形式写入 local.yaml")
 
+    dispatch_mode = str(config.web.task_dispatch_mode or "").strip().lower() or "inline"
+    if dispatch_mode == "redis":
+        if not str(config.web.redis_url or "").strip():
+            issues.append("task_dispatch_mode=redis 但未配置 web.redis_url。")
+        try:
+            import redis  # noqa: F401
+        except ImportError:
+            issues.append("task_dispatch_mode=redis 但当前环境未安装 redis 依赖。")
+
     database_url = str(
         config.storage.task_store_database_url or config.storage.database_url or ""
     ).strip()
@@ -251,17 +260,19 @@ def collect_startup_diagnostics(config: AppConfig) -> dict[str, object]:
 
 def _task_worker_runtime_payload(config: AppConfig, app: Any | None) -> dict[str, object]:
     service = getattr(getattr(app, "state", None), "task_worker_service", None) if app else None
+    dispatch_mode = str(config.web.task_dispatch_mode or "").strip().lower() or "inline"
     enabled = bool(
-        str(config.web.task_dispatch_mode or "").strip().lower() == "queue"
-        and config.web.start_builtin_worker
+        dispatch_mode in {"queue", "redis"} and config.web.start_builtin_worker
     )
     return {
         "enabled": enabled,
         "alive": bool(service.is_alive) if service is not None else False,
-        "task_dispatch_mode": str(config.web.task_dispatch_mode or "").strip().lower()
-        or "inline",
+        "task_dispatch_mode": dispatch_mode,
         "worker_poll_interval_seconds": float(config.web.worker_poll_interval_seconds),
         "worker_stale_after_seconds": float(config.web.worker_stale_after_seconds),
+        "worker_queue_scope": str(config.web.worker_queue_scope or "").strip() or "*",
+        "redis_enabled": dispatch_mode == "redis",
+        "redis_queue_name": str(config.web.redis_queue_name or "").strip(),
     }
 
 

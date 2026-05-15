@@ -134,6 +134,7 @@ def test_run_extraction_applies_site_policy_and_proxy_context(monkeypatch, tmp_p
         def __init__(self, *args, **kwargs):
             self._hooks = {}
             captured["proxy_url"] = kwargs["config"].fetcher.proxy_url
+            captured["proxy_urls"] = list(kwargs["config"].fetcher.proxy_urls or [])
 
         def __enter__(self):
             return self
@@ -173,7 +174,11 @@ def test_run_extraction_applies_site_policy_and_proxy_context(monkeypatch, tmp_p
     assert updated.data["_execution_context"]["worker_id"] == "worker-test-a"
     assert updated.data["_execution_context"]["site_policy_id"].startswith("site-")
     assert updated.data["_execution_context"]["proxy_id"].startswith("proxy-")
+    assert updated.data["_execution_context"]["queue_scope"] == "*"
+    assert updated.data["_execution_context"]["dispatch_backend"] == "inline"
+    assert updated.data["_execution_context"]["proxy_pool_size"] == 1
     assert captured["proxy_url"] == "http://proxy-a.example.com:8000"
+    assert captured["proxy_urls"] == []
     proxies = routes_module._task_store.list_proxy_endpoints(limit=10, tenant_id="default")
     assert proxies[0].success_count >= 1
 

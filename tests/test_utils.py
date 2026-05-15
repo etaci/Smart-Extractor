@@ -8,7 +8,11 @@ import time
 import pytest
 
 from smart_extractor.utils.anti_detect import (
+    assess_challenge,
+    build_access_attempts,
+    build_proxy_candidates,
     get_random_user_agent,
+    mask_proxy_url,
     random_delay,
     URLDeduplicator,
 )
@@ -93,6 +97,60 @@ class TestURLDeduplicator:
         dedup.mark_visited("https://b.com")
         dedup.mark_visited("https://a.com")  # 重复标记
         assert dedup.count() == 2  # 只有 2 个唯一 URL
+
+
+class TestAntiDetectHelpers:
+    def test_mask_proxy_url(self):
+        assert mask_proxy_url("http://user:pass@proxy.example.com:9000") == (
+            "http://user:***@proxy.example.com:9000"
+        )
+
+    def test_build_proxy_candidates_keeps_order_and_direct_fallback(self):
+        candidates = build_proxy_candidates(
+            "http://proxy-a.example.com:8000",
+            ["http://proxy-b.example.com:8001", "http://proxy-a.example.com:8000"],
+        )
+        assert candidates == [
+            "http://proxy-a.example.com:8000",
+            "http://proxy-b.example.com:8001",
+            "",
+        ]
+
+    def test_build_access_attempts_generates_dynamic_and_static_fallback(self):
+        class _Config:
+            proxy_url = "http://proxy-a.example.com:8000"
+            proxy_urls = ["http://proxy-b.example.com:8001"]
+            proxy_rotation_enabled = True
+            fetch_max_attempts = 2
+            challenge_fallback_to_static = True
+            browser_session_pool_size = 2
+            persistent_profile_pool_size = 2
+            persistent_context_dir = ""
+
+        attempts = build_access_attempts(
+            "https://example.com/product/1",
+            _Config(),
+            prefer_dynamic=True,
+        )
+
+        assert attempts[0].fetcher_mode == "dynamic"
+        assert attempts[0].proxy_url == "http://proxy-a.example.com:8000"
+        assert attempts[1].proxy_url == "http://proxy-b.example.com:8001"
+        assert any(item.fetcher_mode == "static" for item in attempts)
+        assert any(item.profile_dir for item in attempts if item.fetcher_mode == "dynamic")
+
+    def test_assess_challenge_detects_block_and_transport_error(self):
+        blocked = assess_challenge(
+            text="Please verify you are human",
+            headers={"cf-ray": "1"},
+            status_code=403,
+        )
+        assert blocked.challenge is True
+        assert blocked.retryable is True
+
+        transport = assess_challenge(error="Proxy timeout while connecting upstream")
+        assert transport.retryable is True
+        assert transport.reason == "transport_error"
 
 
 # ===== 重试策略测试 =====

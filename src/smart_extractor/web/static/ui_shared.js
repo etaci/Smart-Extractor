@@ -2,6 +2,7 @@
 
 window.SmartExtractorShared = (() => {
   const API_TOKEN_STORAGE_KEY = "smart_extractor_api_token";
+  const SESSION_TOKEN_STORAGE_KEY = "smart_extractor_session_token";
   const THEME_STORAGE_KEY = "smart_extractor_ui_theme";
 
   function showToast(message, type = "info") {
@@ -32,6 +33,10 @@ window.SmartExtractorShared = (() => {
     return localStorage.getItem(API_TOKEN_STORAGE_KEY) || "";
   }
 
+  function getSessionToken() {
+    return localStorage.getItem(SESSION_TOKEN_STORAGE_KEY) || "";
+  }
+
   function setApiToken(token) {
     const value = String(token || "").trim();
     if (value) {
@@ -41,8 +46,21 @@ window.SmartExtractorShared = (() => {
     }
   }
 
+  function setSessionToken(token) {
+    const value = String(token || "").trim();
+    if (value) {
+      localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, value);
+    } else {
+      localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
+    }
+  }
+
   function getAuthHeaders(extraHeaders = {}) {
     const headers = { ...extraHeaders };
+    const sessionToken = getSessionToken();
+    if (sessionToken) {
+      headers.Authorization = `Bearer ${sessionToken}`;
+    }
     const token = getApiToken();
     if (token) {
       headers["X-API-Token"] = token;
@@ -105,10 +123,13 @@ window.SmartExtractorShared = (() => {
 
   return {
     API_TOKEN_STORAGE_KEY,
+    SESSION_TOKEN_STORAGE_KEY,
     THEME_STORAGE_KEY,
     showToast,
     getApiToken,
+    getSessionToken,
     setApiToken,
+    setSessionToken,
     getAuthHeaders,
     setTheme,
     initTheme,

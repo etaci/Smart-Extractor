@@ -62,6 +62,48 @@ def test_login_and_bearer_auth(monkeypatch, tmp_path):
     assert payload["auth_mode"] == "session"
 
 
+def test_register_creates_user_and_session(monkeypatch, tmp_path):
+    client, _ = _build_test_client(
+        monkeypatch,
+        tmp_path,
+        auth_secret_key="auth-secret",
+    )
+
+    response = client.post(
+        "/api/auth/register",
+        headers=LOGIN_HEADERS,
+        json={
+            "username": "new-user",
+            "password": "new-pass",
+            "tenant_id": "default",
+            "display_name": "New User",
+        },
+    )
+
+    assert response.status_code == 200
+    token = response.json()["access_token"]
+    me_response = client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert me_response.status_code == 200
+    payload = me_response.json()
+    assert payload["username"] == "new-user"
+    assert payload["display_name"] == "New User"
+    assert payload["role"] == "admin"
+
+    duplicate = client.post(
+        "/api/auth/register",
+        headers=LOGIN_HEADERS,
+        json={
+            "username": "new-user",
+            "password": "new-pass",
+            "tenant_id": "default",
+        },
+    )
+    assert duplicate.status_code == 409
+
+
 def test_quality_and_cost_dashboards_are_tenant_scoped(monkeypatch, tmp_path):
     client, routes_module = _build_test_client(
         monkeypatch,

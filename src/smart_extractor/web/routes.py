@@ -8,6 +8,7 @@ import threading
 from inspect import Parameter, signature
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -27,6 +28,7 @@ from smart_extractor.web.api_models import (
     BatchExtractRequest,
     ExtractRequest,
     LoginRequest,
+    RegisterRequest,
     TaskReviewRequest,
 )
 from smart_extractor.web.auth import AuthService, UserIdentity
@@ -65,6 +67,7 @@ from smart_extractor.web.exporters import (
     build_task_markdown,
     build_task_xlsx,
 )
+from smart_extractor.web.redis_queue import RedisTaskQueue
 from smart_extractor.web.management_helpers import serialize_task_list_item
 from smart_extractor.web.notifier import send_monitor_notification, should_notify
 from smart_extractor.web.task_dispatcher import (
@@ -75,7 +78,11 @@ from smart_extractor.web.task_execution import (
     run_extraction as execute_extraction_task,
     sync_monitor_notification as execute_monitor_notification,
 )
-from smart_extractor.web.task_worker import ManagedTaskWorkerThread, SQLiteTaskWorker
+from smart_extractor.web.task_worker import (
+    ManagedTaskWorkerThread,
+    RedisTaskWorker,
+    SQLiteTaskWorker,
+)
 from smart_extractor.web.template_market import (
     get_market_template,
     list_market_templates,
@@ -113,9 +120,15 @@ _governance_service = GovernanceService(
     task_store=_task_store,
     connect=_task_store._connect,
 )
+_redis_task_queue = RedisTaskQueue(
+    redis_url=_app_config.web.redis_url,
+    queue_name=_app_config.web.redis_queue_name,
+    visibility_timeout_seconds=_app_config.web.redis_visibility_timeout_seconds,
+)
 _task_dispatcher = build_task_dispatcher(
     task_store=_task_store,
     dispatch_mode=_app_config.web.task_dispatch_mode,
+    redis_queue=_redis_task_queue,
 )
 
 
@@ -220,6 +233,12 @@ def _build_extraction_task_spec(
         if force_strategy:
             mode_label = f"{mode_label} + {force_strategy}"
 
+    dispatch_context = _resolve_dispatch_context(
+        url=url,
+        tenant_id=normalized_tenant_id,
+        monitor_id=monitor_id,
+    )
+
     task = _task_store.create(
         str(url or "").strip(),
         mode_label,
@@ -235,7 +254,45 @@ def _build_extraction_task_spec(
         selected_fields=list(selected_fields or []),
         monitor_id=str(monitor_id or "").strip(),
         force_strategy=str(force_strategy or "").strip(),
+        queue_scope=dispatch_context["queue_scope"],
+        isolation_key=dispatch_context["isolation_key"],
+        site_domain=dispatch_context["site_domain"],
+        dispatch_backend=dispatch_context["dispatch_backend"],
     )
+
+
+def _resolve_dispatch_context(
+    *,
+    url: str,
+    tenant_id: str,
+    monitor_id: str = "",
+) -> dict[str, str]:
+    site_domain = (urlsplit(str(url or "").strip()).hostname or "").strip().lower()
+    site_policy = (
+        _task_store.get_site_policy_for_url(url, tenant_id=tenant_id)
+        if site_domain
+        else None
+    )
+    queue_scope = (
+        str(site_policy.assigned_worker_group or "").strip()
+        if site_policy is not None
+        else ""
+    ) or str(_app_config.web.worker_queue_scope or "").strip() or "*"
+    dispatch_mode = str(_app_config.web.task_dispatch_mode or "").strip().lower() or "inline"
+    dispatch_backend = {
+        "queue": "sqlite",
+        "redis": "redis",
+    }.get(dispatch_mode, "inline")
+    isolation_monitor_id = str(monitor_id or "").strip() or "-"
+    return {
+        "queue_scope": queue_scope,
+        "isolation_key": (
+            f"tenant:{tenant_id}:domain:{site_domain or '-'}:"
+            f"monitor:{isolation_monitor_id}"
+        ),
+        "site_domain": site_domain,
+        "dispatch_backend": dispatch_backend,
+    }
 
 
 def _dispatch_extraction_task(
@@ -243,8 +300,13 @@ def _dispatch_extraction_task(
     spec: ExtractionTaskSpec,
     background_tasks: BackgroundTasks | None = None,
 ) -> None:
-    if str(_app_config.web.task_dispatch_mode or "").strip().lower() == "queue":
-        _task_store.enqueue_task_spec(spec, tenant_id=spec.tenant_id)
+    dispatch_mode = str(_app_config.web.task_dispatch_mode or "").strip().lower() or "inline"
+    if dispatch_mode in {"queue", "redis"}:
+        _task_dispatcher.enqueue(
+            background_tasks=background_tasks or BackgroundTasks(),
+            spec=spec,
+            runner=_run_extraction,
+        )
         return
 
     if background_tasks is not None:
@@ -392,13 +454,22 @@ def trigger_monitor_run(
     return str(result.get("task_id") or "").strip() or None
 
 
-def create_task_worker(*, worker_id: str = "") -> SQLiteTaskWorker:
-    return SQLiteTaskWorker(
-        task_store=_task_store,
-        runner=_run_extraction,
-        worker_id=worker_id,
-        stale_after_seconds=_app_config.web.worker_stale_after_seconds,
-    )
+def create_task_worker(*, worker_id: str = ""):
+    dispatch_mode = str(_app_config.web.task_dispatch_mode or "").strip().lower() or "inline"
+    common_kwargs = {
+        "task_store": _task_store,
+        "runner": _run_extraction,
+        "worker_id": worker_id,
+        "queue_scope": str(_app_config.web.worker_queue_scope or "").strip() or "*",
+        "stale_after_seconds": _app_config.web.worker_stale_after_seconds,
+    }
+    if dispatch_mode == "redis":
+        return RedisTaskWorker(
+            **common_kwargs,
+            redis_queue=_redis_task_queue,
+            visibility_timeout_seconds=_app_config.web.redis_visibility_timeout_seconds,
+        )
+    return SQLiteTaskWorker(**common_kwargs)
 
 
 def create_managed_task_worker(*, worker_id: str = "") -> ManagedTaskWorkerThread:
@@ -601,6 +672,32 @@ async def api_login(payload: LoginRequest, request: Request):
     return result
 
 
+@router.post("/api/auth/register")
+async def api_register(payload: RegisterRequest, request: Request):
+    result = _auth_service.register(
+        username=payload.username.strip(),
+        password=payload.password,
+        tenant_id=payload.tenant_id.strip(),
+        display_name=payload.display_name.strip(),
+    )
+    request.state.identity = UserIdentity(
+        user_id=result["user"]["user_id"],
+        username=result["user"]["username"],
+        role=result["user"]["role"],
+        tenant_id=result["user"]["tenant_id"],
+        display_name=result["user"]["display_name"],
+        auth_mode="session",
+    )
+    _audit(
+        request,
+        action="auth.register",
+        resource_type="user",
+        resource_id=result["user"]["user_id"],
+        payload={"username": result["user"]["username"]},
+    )
+    return result
+
+
 @router.get("/api/auth/me")
 async def api_me(request: Request, identity: UserIdentity = Depends(_api_guard)):
     return {
@@ -776,15 +873,23 @@ async def api_batch(
             tenant_id=identity.tenant_id,
         )
         task_ids.append(task.task_id)
-        _task_dispatcher.enqueue(
+        dispatch_context = _resolve_dispatch_context(
+            url=url,
+            tenant_id=identity.tenant_id,
+        )
+        spec = ExtractionTaskSpec(
+            task_id=task.task_id,
+            tenant_id=identity.tenant_id,
+            schema_name=normalized_schema,
+            use_static=False,
+            queue_scope=dispatch_context["queue_scope"],
+            isolation_key=dispatch_context["isolation_key"],
+            site_domain=dispatch_context["site_domain"],
+            dispatch_backend=dispatch_context["dispatch_backend"],
+        )
+        _dispatch_extraction_task(
+            spec=spec,
             background_tasks=background_tasks,
-            spec=ExtractionTaskSpec(
-                task_id=task.task_id,
-                tenant_id=identity.tenant_id,
-                schema_name=normalized_schema,
-                use_static=False,
-            ),
-            runner=_run_extraction,
         )
 
     _request_logger(request).info(
@@ -827,6 +932,10 @@ def _run_extraction(
     monitor_id: str = "",
     force_strategy: str = "",
     worker_id: str = "",
+    queue_scope: str = "*",
+    isolation_key: str = "",
+    site_domain: str = "",
+    dispatch_backend: str = "",
 ):
     execute_extraction_task(
         task_id=task_id,
@@ -837,6 +946,10 @@ def _run_extraction(
         monitor_id=monitor_id,
         force_strategy=force_strategy,
         worker_id=worker_id,
+        queue_scope=queue_scope,
+        isolation_key=isolation_key,
+        site_domain=site_domain,
+        dispatch_backend=dispatch_backend,
         task_store=_task_store,
         load_config_fn=load_config,
         sync_monitor_notification_fn=_sync_monitor_notification,

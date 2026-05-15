@@ -19,20 +19,26 @@ def enqueue_task_payload(
     connect: ConnectionFactory,
     task_id: str,
     payload: dict[str, Any],
+    backend: str = "sqlite",
+    queue_scope: str = "*",
     tenant_id: str = "default",
 ) -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     payload_json = json.dumps(payload, ensure_ascii=False)
+    normalized_backend = str(backend or "sqlite").strip().lower() or "sqlite"
+    normalized_scope = str(queue_scope or "").strip() or "*"
     with lock:
         with connect() as conn:
             if getattr(conn, "dialect", "sqlite") == "postgres":
                 conn.execute(
                     """
                     INSERT INTO web_task_dispatch_queue (
-                        tenant_id, task_id, payload_json, status, created_at, updated_at, claimed_at, worker_id, last_error
-                    ) VALUES (?, ?, ?, 'queued', ?, ?, '', '', '')
+                        tenant_id, task_id, backend, queue_scope, payload_json, status, created_at, updated_at, claimed_at, worker_id, last_error
+                    ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, '', '', '')
                     ON CONFLICT(task_id) DO UPDATE SET
                         tenant_id=EXCLUDED.tenant_id,
+                        backend=EXCLUDED.backend,
+                        queue_scope=EXCLUDED.queue_scope,
                         payload_json=EXCLUDED.payload_json,
                         status='queued',
                         updated_at=EXCLUDED.updated_at,
@@ -40,16 +46,26 @@ def enqueue_task_payload(
                         worker_id='',
                         last_error=''
                     """,
-                    (tenant_id, task_id, payload_json, now, now),
+                    (
+                        tenant_id,
+                        task_id,
+                        normalized_backend,
+                        normalized_scope,
+                        payload_json,
+                        now,
+                        now,
+                    ),
                 )
             else:
                 conn.execute(
                     """
                     INSERT INTO web_task_dispatch_queue (
-                        tenant_id, task_id, payload_json, status, created_at, updated_at, claimed_at, worker_id, last_error
-                    ) VALUES (?, ?, ?, 'queued', ?, ?, '', '', '')
+                        tenant_id, task_id, backend, queue_scope, payload_json, status, created_at, updated_at, claimed_at, worker_id, last_error
+                    ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, '', '', '')
                     ON CONFLICT(task_id) DO UPDATE SET
                         tenant_id=excluded.tenant_id,
+                        backend=excluded.backend,
+                        queue_scope=excluded.queue_scope,
                         payload_json=excluded.payload_json,
                         status='queued',
                         updated_at=excluded.updated_at,
@@ -57,7 +73,15 @@ def enqueue_task_payload(
                         worker_id='',
                         last_error=''
                     """,
-                    (tenant_id, task_id, payload_json, now, now),
+                    (
+                        tenant_id,
+                        task_id,
+                        normalized_backend,
+                        normalized_scope,
+                        payload_json,
+                        now,
+                        now,
+                    ),
                 )
             conn.commit()
 
@@ -68,6 +92,7 @@ def claim_queued_task_payload(
     connect: ConnectionFactory,
     worker_id: str,
     stale_after_seconds: float = 0.0,
+    queue_scope: str = "*",
     tenant_id: str = "default",
 ) -> dict[str, Any] | None:
     now = datetime.now()
@@ -80,6 +105,13 @@ def claim_queued_task_payload(
         else ""
     )
 
+    normalized_scope = str(queue_scope or "").strip() or "*"
+    scope_clause = ""
+    scope_params: tuple[Any, ...] = ()
+    if normalized_scope != "*":
+        scope_clause = " AND queue_scope IN (?, '*')"
+        scope_params = (normalized_scope,)
+
     with lock:
         with connect() as conn:
             conn.begin_immediate()
@@ -87,11 +119,14 @@ def claim_queued_task_payload(
                 row = conn.execute(
                     """
                     SELECT * FROM web_task_dispatch_queue
-                    WHERE status='queued' OR (status='running' AND claimed_at<>'' AND claimed_at<=?)
+                    WHERE (
+                        status='queued' OR (status='running' AND claimed_at<>'' AND claimed_at<=?)
+                    )
+                    """ + scope_clause + """
                     ORDER BY CASE WHEN status='queued' THEN 0 ELSE 1 END, id ASC
                     LIMIT 1
                     """,
-                    (stale_before,),
+                    (stale_before, *scope_params),
                 ).fetchone()
             elif stale_before:
                 row = conn.execute(
@@ -100,29 +135,33 @@ def claim_queued_task_payload(
                     WHERE tenant_id=? AND (
                         status='queued' OR (status='running' AND claimed_at<>'' AND claimed_at<=?)
                     )
+                    """ + scope_clause + """
                     ORDER BY CASE WHEN status='queued' THEN 0 ELSE 1 END, id ASC
                     LIMIT 1
                     """,
-                    (tenant_id, stale_before),
+                    (tenant_id, stale_before, *scope_params),
                 ).fetchone()
             elif _all_tenants(tenant_id):
                 row = conn.execute(
                     """
                     SELECT * FROM web_task_dispatch_queue
                     WHERE status='queued'
+                    """ + scope_clause + """
                     ORDER BY id ASC
                     LIMIT 1
                     """,
+                    scope_params,
                 ).fetchone()
             else:
                 row = conn.execute(
                     """
                     SELECT * FROM web_task_dispatch_queue
                     WHERE tenant_id=? AND status='queued'
+                    """ + scope_clause + """
                     ORDER BY id ASC
                     LIMIT 1
                     """,
-                    (tenant_id,),
+                    (tenant_id, *scope_params),
                 ).fetchone()
 
             if row is None:
@@ -178,6 +217,8 @@ def claim_queued_task_payload(
         "status": claimed_row["status"] or "",
         "worker_id": claimed_row["worker_id"] or "",
         "tenant_id": claimed_row["tenant_id"] or row_tenant_id,
+        "backend": claimed_row["backend"] or "sqlite",
+        "queue_scope": claimed_row["queue_scope"] or "*",
     }
 
 

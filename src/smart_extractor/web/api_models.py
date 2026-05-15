@@ -230,6 +230,13 @@ class LoginRequest(BaseModel):
     tenant_id: str = Field(default="", description="Tenant id")
 
 
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=1, description="Username")
+    password: str = Field(min_length=1, description="Password")
+    tenant_id: str = Field(default="", description="Tenant id")
+    display_name: str = Field(default="", description="Display name")
+
+
 class TaskReviewRequest(BaseModel):
     confirmed: bool = Field(description="Whether the task result is manually confirmed")
     accuracy_score: float = Field(

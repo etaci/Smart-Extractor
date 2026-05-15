@@ -74,12 +74,21 @@ Desktop.ini
 logs/
 output/
 screenshots/
+playwright-report/
+test-results/
 *.log
 *.pid
 *.seed
 *.sqlite
 *.sqlite3
 *.db
+*.sqlite-shm
+*.sqlite-wal
+*.db-shm
+*.db-wal
+dump.rdb
+storage_state*.json
+*.trace.zip
 
 # =========================
 # Local config and secrets
@@ -94,3 +103,8 @@ config/local.yaml
 # =========================
 cleaned_text.txt
 debug_wiki.txt
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej

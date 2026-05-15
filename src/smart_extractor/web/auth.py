@@ -16,6 +16,8 @@ from fastapi import HTTPException, Request
 
 ConnectionFactory = Callable[[], object]
 
+DEFAULT_SESSION_SECRET = "smart-extractor-local-default-session-secret"
+
 ROLE_PERMISSIONS = {
     "admin": {
         "dashboard:read",
@@ -114,7 +116,10 @@ class AuthService:
 
     @property
     def enabled(self) -> bool:
-        return bool(str(self._config.security.auth_secret_key or "").strip())
+        return True
+
+    def _session_secret(self) -> str:
+        return str(self._config.security.auth_secret_key or "").strip() or DEFAULT_SESSION_SECRET
 
     def ensure_bootstrap_admin(self) -> None:
         if not self.enabled:
@@ -182,7 +187,7 @@ class AuthService:
         payload_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         encoded_payload = _b64url(payload_bytes)
         signature = hmac.new(
-            str(self._config.security.auth_secret_key).encode("utf-8"),
+            self._session_secret().encode("utf-8"),
             encoded_payload.encode("ascii"),
             hashlib.sha256,
         ).digest()
@@ -196,7 +201,7 @@ class AuthService:
         if version != "se1":
             raise HTTPException(status_code=401, detail="登录态版本不支持")
         expected_sig = hmac.new(
-            str(self._config.security.auth_secret_key).encode("utf-8"),
+            self._session_secret().encode("utf-8"),
             encoded_payload.encode("ascii"),
             hashlib.sha256,
         ).digest()
@@ -273,6 +278,57 @@ class AuthService:
                 "display_name": user.get("display_name", ""),
             },
         }
+
+    def register(
+        self,
+        *,
+        username: str,
+        password: str,
+        tenant_id: str = "",
+        display_name: str = "",
+    ) -> dict[str, Any]:
+        normalized_username = str(username or "").strip()
+        normalized_password = str(password or "")
+        if not normalized_username:
+            raise HTTPException(status_code=400, detail="账号不能为空")
+        if len(normalized_password) < 6:
+            raise HTTPException(status_code=400, detail="密码至少 6 位")
+        normalized_tenant_id = str(
+            tenant_id or self._config.security.default_tenant_id or "default"
+        ).strip() or "default"
+        normalized_display_name = str(display_name or "").strip() or normalized_username
+        with self._lock:
+            with self._connect() as conn:
+                existing = conn.execute(
+                    "SELECT user_id FROM web_users WHERE tenant_id=? AND username=?",
+                    (normalized_tenant_id, normalized_username),
+                ).fetchone()
+                if existing is not None:
+                    raise HTTPException(status_code=409, detail="账号已存在")
+                user_id = f"usr-{uuid4().hex[:12]}"
+                conn.execute(
+                    """
+                    INSERT INTO web_users (
+                        user_id, tenant_id, username, password_hash, role,
+                        display_name, is_active, created_at, updated_at, last_login_at
+                    ) VALUES (?, ?, ?, ?, 'admin', ?, 1, ?, ?, '')
+                    """,
+                    (
+                        user_id,
+                        normalized_tenant_id,
+                        normalized_username,
+                        hash_password(normalized_password),
+                        normalized_display_name,
+                        _now_text(),
+                        _now_text(),
+                    ),
+                )
+                conn.commit()
+        return self.login(
+            username=normalized_username,
+            password=normalized_password,
+            tenant_id=normalized_tenant_id,
+        )
 
     def authenticate_bearer(self, token: str) -> UserIdentity:
         if not self.enabled:

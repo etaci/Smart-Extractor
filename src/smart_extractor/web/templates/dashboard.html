@@ -4,9 +4,34 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>网页智能提取分析系统</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260422-airtable-1">
+  <link rel="stylesheet" href="/static/style.css?v=20260515-auth-register-1">
 </head>
-<body data-page="dashboard">
+<body data-page="dashboard" class="auth-login">
+  <section id="login-screen" class="login-screen" aria-labelledby="login-title">
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="login-icon" aria-hidden="true">▤</div>
+        <h1 id="login-title">网页智能提取分析系统</h1>
+        <p>网页数据抽取 · 智能分析 · 运营治理</p>
+      </div>
+      <div class="auth-mode-switch" role="tablist" aria-label="账号入口">
+        <button id="auth-login-tab" class="auth-mode-btn auth-mode-login" type="button" data-auth-mode="login">登录</button>
+        <button id="auth-register-tab" class="auth-mode-btn auth-mode-register active" type="button" data-auth-mode="register">注册</button>
+      </div>
+      <form id="login-form" class="login-form">
+        <input id="login-tenant" class="login-hidden-tenant" type="hidden" value="default" autocomplete="organization">
+        <label class="login-label" for="login-username">账号</label>
+        <input id="login-username" class="login-input" type="text" autocomplete="username" placeholder="请输入账号" required>
+        <label class="login-label" for="login-password">密码</label>
+        <input id="login-password" class="login-input" type="password" autocomplete="current-password" placeholder="请输入密码" required>
+        <div class="login-actions">
+          <button id="login-submit-btn" class="login-submit" type="submit" disabled>注册并进入系统</button>
+          <span id="login-result" class="submit-result" style="display:none;"></span>
+        </div>
+        <p class="login-agreement">使用本系统即表示您同意遵守数据合规与后台操作规范</p>
+      </form>
+    </div>
+  </section>
   <div class="app-shell">
     <aside class="sidebar">
       <section class="brand-block">
@@ -35,7 +60,15 @@
         </button>
         <button class="nav-item nav-item-assets" data-section="assets" type="button">
           <span class="nav-order">05</span>
+          <span class="nav-text">监控中心</span>
+        </button>
+        <button class="nav-item nav-item-assets" data-section="ops-assets" type="button">
+          <span class="nav-order">06</span>
           <span class="nav-text">运营资产</span>
+        </button>
+        <button class="nav-item nav-item-analysis" data-section="backoffice" type="button">
+          <span class="nav-order">07</span>
+          <span class="nav-text">后台可视化</span>
         </button>
       </nav>
 
@@ -77,7 +110,7 @@
           <div class="hero-actions">
             <button class="btn btn-primary" type="button" data-open-section="extract">开始一次任务</button>
             <button class="btn btn-ghost" type="button" data-open-section="analyzer">先做智能分析</button>
-            <button class="btn btn-soft" type="button" data-open-section="assets">查看运营资产</button>
+            <button class="btn btn-soft" type="button" data-open-section="ops-assets">查看运营资产</button>
           </div>
           <div class="hero-tags">
             <span>自动识别字段</span>
@@ -187,7 +220,7 @@
                 <strong>先做 URL 分析</strong>
                 <p>适合还不确定该抽什么字段，或想先比较多个页面。</p>
               </button>
-              <button class="next-step-card" type="button" data-open-section="assets">
+              <button class="next-step-card" type="button" data-open-section="ops-assets">
                 <strong>查看已有资产</strong>
                 <p>从站点记忆、监控和通知里判断哪些能力已经可复用。</p>
               </button>
@@ -705,6 +738,24 @@
       </section>
 
       <section id="section-tasks" class="content-section section-hidden tasks-section">
+        <article class="panel governance-panel">
+          <div class="section-heading">
+            <span>治理中心</span>
+            <small>质量、成本、审计与人工复核统一放在任务进展中处理</small>
+          </div>
+          <div class="governance-actions">
+            <button id="load-quality-btn" class="btn btn-soft btn-inline" type="button">质量看板</button>
+            <button id="load-cost-btn" class="btn btn-soft btn-inline" type="button">成本看板</button>
+            <button id="load-audit-btn" class="btn btn-ghost btn-inline" type="button">审计日志</button>
+            <button id="load-review-btn" class="btn btn-ghost btn-inline" type="button">人工复核</button>
+          </div>
+          <div id="governance-result" class="governance-grid">
+            <div class="insight-item">
+              <span class="insight-title">等待选择治理视图</span>
+              <p>点击上方按钮后，这里会展示后端返回的质量、成本、审计或人工复核结果。</p>
+            </div>
+          </div>
+        </article>
         <article class="panel tasks-panel">
           <div class="section-heading">
             <span>任务进展</span>
@@ -1009,9 +1060,7 @@
         </article>
       </section>
 
-      <section id="section-assets" class="content-section section-hidden assets-section">
-        
-        <!-- 【被替换为任务模板市场】的资产大背景框 -->
+      <section id="section-ops-assets" class="content-section section-hidden ops-assets-section">
         <article class="panel assets-intro-panel assets-hero-shell extract-template-panel">
           <div class="section-heading">
             <span>任务模板市场</span>
@@ -1045,7 +1094,45 @@
           </div>
         </article>
 
-        <!-- 【被保留的】其余监控与资产面板 -->
+        <article class="panel actor-market-panel">
+          <div class="section-heading">
+            <span>Actor 市场</span>
+            <small>安装业务能力包，并可联动生成模板或监控</small>
+          </div>
+          <div class="tasks-toolbar">
+            <button id="actor-market-refresh-btn" class="btn btn-soft btn-inline" type="button">刷新 Actor 市场</button>
+          </div>
+          <div class="market-template-grid">
+            <section class="selection-panel market-template-panel">
+              <div class="section-heading compact">
+                <span>可安装 Actor</span>
+                <small>面向业务场景的一组抓取与治理能力</small>
+              </div>
+              <div id="actor-market-board" class="insight-list compact-list"></div>
+            </section>
+            <section class="selection-panel market-template-panel">
+              <div class="section-heading compact">
+                <span>已安装 Actor</span>
+                <small>当前工作区可复用的能力包</small>
+              </div>
+              <div id="actor-installed-board" class="insight-list compact-list"></div>
+            </section>
+          </div>
+        </article>
+      </section>
+
+      <section id="section-assets" class="content-section section-hidden assets-section">
+        <article class="panel monitor-center-intro-panel assets-hero-shell">
+          <div class="section-heading">
+            <span>监控与通知中心</span>
+            <small>监控、通知、运行治理、人工标注与自动修复闭环集中在这里</small>
+          </div>
+          <div class="governance-actions">
+            <button id="load-runtime-ops-btn" class="btn btn-soft btn-inline" type="button">运行治理</button>
+            <button id="load-annotations-btn" class="btn btn-ghost btn-inline" type="button">人工标注 + 自动修复闭环</button>
+          </div>
+          <div id="monitor-center-result" class="governance-grid"></div>
+        </article>
         <div class="insight-dual-grid assets-top-grid">
           <article class="panel assets-watchlist-panel">
             <div class="section-heading">
@@ -1139,6 +1226,19 @@
           </div>
         </article>
       </section>
+
+      <section id="section-backoffice" class="content-section section-hidden backoffice-section">
+        <article class="panel backoffice-panel">
+          <div class="section-heading">
+            <span>统一后台工作台</span>
+            <small>承接 /api/dashboard 的任务、模板、Actor、监控、通知与运行状态聚合视图</small>
+          </div>
+          <div class="governance-actions">
+            <button id="backoffice-refresh-btn" class="btn btn-primary btn-inline" type="button">刷新后台总览</button>
+          </div>
+          <div id="backoffice-summary-board" class="governance-grid"></div>
+        </article>
+      </section>
     </main>
   </div>
 
@@ -1189,11 +1289,11 @@
   <script id="initial-tasks" type="application/json">{{ tasks|tojson }}</script>
   <script id="initial-insights" type="application/json">{{ insights|tojson }}</script>
   <script id="runtime-status" type="application/json">{{ runtime_status|tojson }}</script>
-  <script src="/static/ui_shared.js?v=20260417-1"></script>
+  <script src="/static/ui_shared.js?v=20260515-auth-register-1"></script>
   <script src="/static/dashboard_analysis.js?v=20260417-1"></script>
-  <script src="/static/dashboard_templates_monitors.js?v=20260418-2"></script>
+  <script src="/static/dashboard_templates_monitors.js?v=20260515-auth-register-1"></script>
   <script src="/static/dashboard_learned_profiles.js?v=20260423-1"></script>
   <script src="/static/dashboard_task_runtime.js?v=20260418-2"></script>
-  <script src="/static/app.js?v=20260418-2"></script>
+  <script src="/static/app.js?v=20260515-auth-register-1"></script>
 </body>
 </html>

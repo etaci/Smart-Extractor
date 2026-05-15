@@ -720,11 +720,15 @@ class SQLiteTaskStore:
 
     def enqueue_task_spec(self, spec, tenant_id: str = "") -> None:
         normalized_tenant_id = self._normalize_tenant_id(tenant_id)
+        dispatch_backend = getattr(spec, "dispatch_backend", "sqlite")
+        queue_scope = getattr(spec, "queue_scope", "*")
         enqueue_task_payload(
             lock=self._lock,
             connect=self._connect,
             task_id=spec.task_id,
             payload=spec.to_queue_payload(),
+            backend=str(dispatch_backend or "sqlite").strip().lower() or "sqlite",
+            queue_scope=str(queue_scope or "").strip() or "*",
             tenant_id=normalized_tenant_id,
         )
         self.mark_queued(spec.task_id, tenant_id=normalized_tenant_id)
@@ -734,6 +738,7 @@ class SQLiteTaskStore:
         *,
         worker_id: str,
         stale_after_seconds: float = 0.0,
+        queue_scope: str = "*",
         tenant_id: str = "",
     ) -> tuple[TaskRecord, dict[str, Any]] | None:
         normalized_tenant_id = self._normalize_tenant_id(tenant_id)
@@ -742,6 +747,7 @@ class SQLiteTaskStore:
             connect=self._connect,
             worker_id=worker_id,
             stale_after_seconds=stale_after_seconds,
+            queue_scope=queue_scope,
             tenant_id=normalized_tenant_id,
         )
         if not claimed:
@@ -1220,6 +1226,20 @@ class SQLiteTaskStore:
         preferred_tags: Optional[list[str]] = None,
         tenant_id: str = "",
     ) -> ProxyEndpointRecord | None:
+        candidates = self.pick_proxy_endpoints(
+            preferred_tags=preferred_tags,
+            limit=1,
+            tenant_id=tenant_id,
+        )
+        return candidates[0] if candidates else None
+
+    def pick_proxy_endpoints(
+        self,
+        *,
+        preferred_tags: Optional[list[str]] = None,
+        limit: int = 5,
+        tenant_id: str = "",
+    ) -> list[ProxyEndpointRecord]:
         normalized_tags = {
             str(item).strip()
             for item in (preferred_tags or [])
@@ -1239,15 +1259,15 @@ class SQLiteTaskStore:
             if tagged:
                 candidates = tagged
         if not candidates:
-            return None
+            return []
         candidates.sort(
             key=lambda item: (
                 int(item.failure_count or 0),
-                int(item.success_count or 0),
+                -int(item.success_count or 0),
                 str(item.last_used_at or ""),
             )
         )
-        return candidates[0]
+        return candidates[: max(int(limit or 0), 1)]
 
     def mark_proxy_endpoint_result(
         self,

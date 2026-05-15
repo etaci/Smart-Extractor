@@ -88,11 +88,11 @@ def _app():
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
         payload = _dashboard()
-        return TEMPLATES.TemplateResponse(request, "dashboard.html", {"stats": payload["stats"], "tasks": payload["tasks"], "insights": payload["insights"], "app_version": "0.3.0", "api_token_required": True, "runtime_status": payload["runtime_status"]})
+        return TEMPLATES.TemplateResponse(request, "dashboard.html", {"stats": payload["stats"], "tasks": payload["tasks"], "insights": payload["insights"], "app_version": "1.2.0", "api_token_required": True, "runtime_status": payload["runtime_status"]})
 
     @app.get("/task/{task_id}", response_class=HTMLResponse)
     async def task_detail(request: Request, task_id: str):
-        return TEMPLATES.TemplateResponse(request, "task_detail.html", {"task": _task(task_id), "app_version": "0.3.0"})
+        return TEMPLATES.TemplateResponse(request, "task_detail.html", {"task": _task(task_id), "app_version": "1.2.0"})
 
     return app
 
@@ -129,6 +129,13 @@ def _mock_api(page, calls):
         calls.append(f"{request.method} {path}")
         if path == "/api/config/basic" and request.method == "GET":
             return _fulfill(route, {"api_key": "k", "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini", "temperature": 0.2})
+        if path == "/api/auth/me":
+            return _fulfill(route, {"user_id": "token-admin", "username": "token-admin", "role": "admin", "tenant_id": "default", "display_name": "Token Admin", "auth_mode": "api_token"})
+        if path == "/api/auth/login":
+            return _fulfill(route, {"access_token": "session-token", "token_type": "bearer", "user": {"user_id": "usr-1", "username": "admin", "role": "admin", "tenant_id": "default", "display_name": "Admin"}})
+        if path == "/api/auth/register":
+            data = json.loads(request.post_data or "{}")
+            return _fulfill(route, {"access_token": "session-token", "token_type": "bearer", "user": {"user_id": "usr-2", "username": data.get("username", "new-user"), "role": "admin", "tenant_id": "default", "display_name": data.get("display_name") or data.get("username", "new-user")}})
         if path == "/api/config/basic":
             return _fulfill(route, {"message": "saved", "config": json.loads(request.post_data or "{}")})
         if path == "/api/runtime":
@@ -139,6 +146,26 @@ def _mock_api(page, calls):
             return _fulfill(route, {"templates": _dashboard()["templates"]})
         if path == "/api/template_market":
             return _fulfill(route, {"templates": _dashboard()["market_templates"]})
+        if path == "/api/actor_market":
+            return _fulfill(route, {"actors": [{"actor_id": "actor-commerce", "name": "Commerce Actor", "description": "Install commerce capability", "category": "commerce", "tags": ["price"], "version": "1.0.0"}]})
+        if path == "/api/actors":
+            return _fulfill(route, {"actors": [{"actor_id": "actor-installed", "name": "Installed Actor", "description": "Ready", "category": "ops", "status": "active"}]})
+        if path == "/api/actor_market/install" and request.method == "POST":
+            return _fulfill(route, {"ok": True, "actor": {"actor_id": "actor-commerce"}})
+        if path == "/api/quality":
+            return _fulfill(route, {"summary": {"avg_quality": 0.9}, "recent": []})
+        if path == "/api/cost":
+            return _fulfill(route, {"summary": {"total_cost": 1.2}, "recent": []})
+        if path == "/api/audit":
+            return _fulfill(route, {"logs": [{"action": "auth.login", "resource_type": "session"}]})
+        if path == "/api/annotations":
+            return _fulfill(route, {"annotations": [{"task_id": "task-001", "status": "pending"}]})
+        if path == "/api/workers":
+            return _fulfill(route, {"workers": [{"worker_id": "worker-1", "status": "alive"}]})
+        if path == "/api/proxies":
+            return _fulfill(route, {"proxies": [{"proxy_id": "proxy-1", "status": "healthy"}]})
+        if path == "/api/site_policies":
+            return _fulfill(route, {"policies": [{"domain": "example.com", "strategy": "static"}]})
         if path == "/api/monitors" and request.method == "GET":
             return _fulfill(route, {"monitors": _dashboard()["monitors"]})
         if path == "/api/notifications":
@@ -207,7 +234,7 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
         page.add_init_script(
             """
-            localStorage.setItem('smart_extractor_api_token', 'token');
+            localStorage.setItem('smart_extractor_session_token', 'session-token');
             window.confirm = () => true;
             window.prompt = () => 'Auto Name';
             Object.defineProperty(navigator, 'clipboard', {
@@ -229,14 +256,30 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
             "() => !document.getElementById('section-analyzer').classList.contains('section-hidden')"
         )
         page.click(".nav-item[data-section='overview']")
-        page.click(".hero-actions [data-open-section='assets']")
+        page.click(".hero-actions [data-open-section='ops-assets']")
         page.wait_for_function(
-            "() => !document.getElementById('section-assets').classList.contains('section-hidden')"
+            "() => !document.getElementById('section-ops-assets').classList.contains('section-hidden')"
         )
         page.click(".nav-item[data-section='tasks']")
         page.wait_for_function(
             "() => !document.getElementById('section-tasks').classList.contains('section-hidden')"
         )
+        page.click("#load-quality-btn")
+        page.click("#load-cost-btn")
+        page.click("#load-audit-btn")
+        page.click("#load-review-btn")
+        page.click(".nav-item[data-section='assets']")
+        page.wait_for_function(
+            "() => !document.getElementById('section-assets').classList.contains('section-hidden')"
+        )
+        page.click("#load-runtime-ops-btn")
+        page.click("#load-annotations-btn")
+        page.select_option("#learned-profile-filter", "risky")
+        page.select_option("#notification-filter", "failed")
+        page.click(".nav-item[data-section='ops-assets']")
+        page.click("#actor-market-refresh-btn")
+        page.click(".nav-item[data-section='backoffice']")
+        page.click("#backoffice-refresh-btn")
         page.click(".nav-item[data-section='overview']")
         page.evaluate("document.querySelector(\"#section-overview .quick-entry-card [data-quick-template='market-policy-watch']\").click()")
         page.click(".nav-item[data-section='overview']")
@@ -280,7 +323,9 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.fill("#monitor-webhook-url", "https://example.com/hook")
         page.fill("#monitor-notification-channels", "webhook|main|https://example.com/hook|secret")
         page.check("#monitor-digest-enabled")
+        page.select_option("#monitor-digest-hour", "10")
         page.check("#monitor-schedule-enabled")
+        page.select_option("#monitor-schedule-interval", "180")
         page.click("#save-template-btn")
         page.click("#save-monitor-btn")
         page.click("#submit-btn")
@@ -288,6 +333,7 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.click("#batch-load-watchlist-btn")
         page.fill("#batch-urls", "https://example.com/a\nhttps://example.com/b")
         page.click("#batch-normalize-btn")
+        page.select_option("#batch-domain-filter", "all")
         page.click("#batch-expand-all-btn")
         page.click("#batch-collapse-all-btn")
         page.check("input[name='batch-submit-mode'][value='continue']")
@@ -298,6 +344,13 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.goto(web_ui_base_url, wait_until="networkidle")
         page.click("[data-section='analyzer']")
         page.fill("#insight-url", "https://example.com/insight")
+        page.select_option("#insight-static-mode", "true")
+        page.select_option("#insight-goal", "risk")
+        page.select_option("#insight-role", "researcher")
+        page.fill("#insight-priority", "high")
+        page.select_option("#insight-output-format", "actions")
+        page.fill("#insight-constraints", "keep it short")
+        page.fill("#insight-notes", "Focus on evidence.")
         page.click("#insight-analyze-page-btn")
         page.click("#insight-submit-btn")
         page.wait_for_selector("#insight-results-panel", state="visible")
@@ -321,14 +374,27 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.evaluate(
             "document.getElementById('compare-urls').value = 'https://example.com/a\\nhttps://example.com/b'"
         )
+        page.select_option("#compare-static-mode", "true")
+        page.fill("#compare-focus", "price")
+        page.select_option("#compare-output-format", "brief")
+        page.select_option("#compare-goal", "decision")
+        page.select_option("#compare-role", "operator")
+        page.fill("#compare-must-have", "stable price")
+        page.fill("#compare-elimination", "missing data")
+        page.fill("#compare-notes", "Prefer clear recommendation.")
         page.evaluate("document.getElementById('compare-analyze-btn').click()")
         page.evaluate("document.getElementById('insight-submit-btn').click()")
 
-        page.click("[data-section='assets']")
+        page.click("[data-section='ops-assets']")
+        page.select_option("#template-market-filter", "monitor")
+        page.select_option("#template-market-filter", "all")
         page.evaluate("document.querySelector(\"[data-apply-market-template='market-policy-watch']\").click()")
         page.evaluate("document.querySelector(\"[data-install-market-template='market-policy-watch']\").click()")
+        page.evaluate("document.querySelector(\"[data-install-actor='actor-commerce']\").click()")
         page.evaluate("document.querySelector(\"[data-apply-template='tpl-1']\").click()")
+        page.click("[data-section='assets']")
         page.evaluate("document.getElementById('learned-profile-search').value = 'example'")
+        page.select_option("#learned-profile-filter", "active")
         page.evaluate("document.getElementById('learned-profile-bulk-disable-btn').click()")
         page.evaluate("document.getElementById('learned-profile-bulk-relearn-btn').click()")
         page.evaluate("document.querySelector(\"[data-open-learned-profile='lp-1']\").click()")
@@ -339,6 +405,8 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.evaluate("document.querySelector(\"[data-disable-learned-profile='lp-1']\").click()")
         page.evaluate("document.querySelector(\"[data-reset-learned-profile='lp-1']\").click()")
         page.evaluate("document.querySelector(\"[data-delete-learned-profile='lp-1']\").click()")
+        page.click("[data-section='assets']")
+        page.select_option("#notification-filter", "failed")
         page.evaluate("document.getElementById('notification-refresh-btn').click()")
         page.evaluate("document.querySelector(\"[data-resend-notification='notif-1']\").click()")
         page.evaluate("document.querySelector(\"[data-run-monitor='mon-1']\").click()")
@@ -375,7 +443,7 @@ def test_dashboard_basic_config_controls_smoke(web_ui_base_url):
         page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
         page.add_init_script(
             """
-            localStorage.setItem('smart_extractor_api_token', 'token');
+            localStorage.setItem('smart_extractor_session_token', 'session-token');
             window.confirm = () => true;
             window.prompt = () => 'Auto Name';
             """
@@ -392,5 +460,33 @@ def test_dashboard_basic_config_controls_smoke(web_ui_base_url):
 
     assert any(call.startswith("GET /api/config/basic") for call in calls)
     assert any(call.startswith("POST /api/config/basic") for call in calls)
+    assert page_errors == []
+    assert console_errors == []
+
+
+def test_dashboard_login_screen_smoke(web_ui_base_url):
+    calls, page_errors, console_errors = [], [], []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+        page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+        _mock_api(page, calls)
+
+        page.goto(web_ui_base_url, wait_until="networkidle")
+        page.click("#auth-login-tab")
+        page.click("#auth-register-tab")
+        page.wait_for_selector("#login-screen:not(.login-screen-hidden)")
+        page.fill("#login-username", "admin")
+        page.fill("#login-password", "secret")
+        page.click("#login-submit-btn")
+        page.wait_for_function(
+            "() => document.getElementById('login-screen')?.classList.contains('login-screen-hidden')"
+        )
+        page.click(".nav-item[data-section='overview']")
+        browser.close()
+
+    assert any(call.startswith("POST /api/auth/register") for call in calls)
+    assert any(call.startswith("GET /api/dashboard") for call in calls)
     assert page_errors == []
     assert console_errors == []

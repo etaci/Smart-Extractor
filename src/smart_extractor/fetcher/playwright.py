@@ -1,9 +1,8 @@
-"""
-Playwright 动态网页抓取器。
+"""Playwright fetcher with proxy/session/profile pooling and multi-level fallback."""
 
-优先复用持久化浏览器 Profile，其次复用 storage_state，以提升真实页面命中率。
-"""
+from __future__ import annotations
 
+import hashlib
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,11 +14,17 @@ from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_
 
 from smart_extractor.config import FetcherConfig
 from smart_extractor.fetcher.base import BaseFetcher, FetchResult
+from smart_extractor.fetcher.static import StaticFetcher
 from smart_extractor.utils.anti_detect import (
+    AccessAttempt,
+    ChallengeAssessment,
+    assess_challenge,
+    build_access_attempts,
     get_random_user_agent,
     headers_indicate_challenge,
     looks_like_challenge_text,
     looks_like_loading_text,
+    mask_proxy_url,
 )
 
 
@@ -41,7 +46,7 @@ window.chrome = window.chrome || { runtime: {} };
 
 
 class PlaywrightFetcher(BaseFetcher):
-    """基于 Playwright 的动态网页抓取器。"""
+    """Playwright-based fetcher with per-attempt browser isolation."""
 
     def __init__(self, config: Optional[FetcherConfig] = None):
         self._config = config or FetcherConfig()
@@ -51,17 +56,25 @@ class PlaywrightFetcher(BaseFetcher):
         self._initialized = False
         self._uses_persistent_context = False
 
-    def _resolve_storage_state_path(self) -> Optional[Path]:
-        if not self._config.storage_state_path:
-            return None
-        return Path(self._config.storage_state_path)
+    def _ensure_playwright(self) -> Playwright:
+        if self._playwright is None:
+            self._playwright = sync_playwright().start()
+        return self._playwright
 
-    def _resolve_persistent_context_dir(self) -> Optional[Path]:
-        if not self._config.persistent_context_dir:
-            return None
-        return Path(self._config.persistent_context_dir)
+    def _resolve_storage_state_path(self, override_path: str = "") -> Optional[Path]:
+        target = str(override_path or self._config.storage_state_path or "").strip()
+        return Path(target) if target else None
 
-    def _build_context_options(self, user_agent: str, include_storage_state: bool = True) -> dict:
+    def _resolve_persistent_context_dir(self, override_dir: str = "") -> Optional[Path]:
+        target = str(override_dir or self._config.persistent_context_dir or "").strip()
+        return Path(target) if target else None
+
+    def _build_context_options(
+        self,
+        user_agent: str,
+        include_storage_state: bool = True,
+        storage_state_path: str = "",
+    ) -> dict:
         options = {
             "viewport": {
                 "width": self._config.viewport_width,
@@ -73,11 +86,9 @@ class PlaywrightFetcher(BaseFetcher):
             "extra_http_headers": dict(_DEFAULT_HEADERS),
             "ignore_https_errors": not self._config.verify_ssl,
         }
-
-        storage_state_path = self._resolve_storage_state_path()
-        if include_storage_state and storage_state_path and storage_state_path.exists():
-            options["storage_state"] = str(storage_state_path)
-
+        resolved_path = self._resolve_storage_state_path(storage_state_path)
+        if include_storage_state and resolved_path and resolved_path.exists():
+            options["storage_state"] = str(resolved_path)
         return options
 
     def _build_launch_args(self) -> list[str]:
@@ -88,11 +99,11 @@ class PlaywrightFetcher(BaseFetcher):
             "--disable-features=IsolateOrigins,site-per-process",
         ]
 
-    def _build_proxy_options(self) -> dict[str, str] | None:
-        proxy_url = str(self._config.proxy_url or "").strip()
-        if not proxy_url:
+    def _build_proxy_options(self, proxy_url: str | None = None) -> dict[str, str] | None:
+        resolved_proxy = str(proxy_url or self._config.proxy_url or "").strip()
+        if not resolved_proxy:
             return None
-        parts = urlsplit(proxy_url)
+        parts = urlsplit(resolved_proxy)
         hostname = parts.hostname or ""
         if not hostname:
             return None
@@ -105,68 +116,67 @@ class PlaywrightFetcher(BaseFetcher):
             payload["username"] = parts.username
         if parts.password:
             payload["password"] = parts.password
-        logger.info("Playwright 抓取使用代理: {}", server)
+        logger.info("PlaywrightFetcher 使用代理: {}", mask_proxy_url(resolved_proxy))
         return payload
 
+    # Compatibility wrappers retained for existing tests and call sites.
     def _ensure_browser(self) -> Optional[Browser]:
         if self._initialized:
             return self._browser
-
-        logger.info("启动 Playwright 浏览器，headless={}", self._config.headless)
-        if self._playwright is None:
-            self._playwright = sync_playwright().start()
+        playwright = self._ensure_playwright()
         user_agent = self._config.user_agent or get_random_user_agent()
         persistent_dir = self._resolve_persistent_context_dir()
         proxy_options = self._build_proxy_options()
-
         if persistent_dir:
             persistent_dir.mkdir(parents=True, exist_ok=True)
             self._uses_persistent_context = True
-            self._context = self._playwright.chromium.launch_persistent_context(
+            self._context = playwright.chromium.launch_persistent_context(
                 user_data_dir=str(persistent_dir),
                 headless=self._config.headless,
                 args=self._build_launch_args(),
                 proxy=proxy_options,
-                **self._build_context_options(user_agent, include_storage_state=False),
+                **self._build_context_options(
+                    user_agent,
+                    include_storage_state=False,
+                ),
             )
             self._context.add_init_script(_ANTI_DETECT_SCRIPT)
             self._browser = self._context.browser
-            logger.info("Playwright 持久化 Profile 已启用: {}", persistent_dir)
         else:
-            self._browser = self._playwright.chromium.launch(
+            self._browser = playwright.chromium.launch(
                 headless=self._config.headless,
                 args=self._build_launch_args(),
                 proxy=proxy_options,
             )
-
         self._initialized = True
-        logger.info("Playwright 浏览器启动成功")
         return self._browser
 
     def _get_context(self) -> BrowserContext:
-        if self._context:
+        if self._context is not None:
             return self._context
-
         browser = self._ensure_browser()
         if browser is None:
-            raise RuntimeError("Playwright 浏览器未成功初始化")
-
+            raise RuntimeError("Playwright 浏览器初始化失败")
         user_agent = self._config.user_agent or get_random_user_agent()
         self._context = browser.new_context(**self._build_context_options(user_agent))
         self._context.add_init_script(_ANTI_DETECT_SCRIPT)
         return self._context
 
-    def _create_page(self) -> Page:
-        return self._get_context().new_page()
+    def _create_page(self, context: BrowserContext | None = None) -> Page:
+        return (context or self._get_context()).new_page()
 
-    def _persist_storage_state(self) -> None:
-        storage_state_path = self._resolve_storage_state_path()
-        if not storage_state_path or not self._context:
+    def _persist_storage_state(
+        self,
+        context: BrowserContext,
+        *,
+        storage_state_path: str = "",
+    ) -> None:
+        resolved_path = self._resolve_storage_state_path(storage_state_path)
+        if resolved_path is None:
             return
-
         try:
-            storage_state_path.parent.mkdir(parents=True, exist_ok=True)
-            self._context.storage_state(path=str(storage_state_path))
+            resolved_path.parent.mkdir(parents=True, exist_ok=True)
+            context.storage_state(path=str(resolved_path))
         except Exception as exc:
             logger.warning("保存 Playwright storage_state 失败: {}", exc)
 
@@ -174,24 +184,19 @@ class PlaywrightFetcher(BaseFetcher):
     def _extract_body_text(page: Page) -> str:
         try:
             return page.locator("body").inner_text(timeout=1000).strip()
-        except Exception as exc:
-            logger.debug("读取 body 文本失败，按空字符串处理: {}", exc)
+        except Exception:
             return ""
 
     @staticmethod
     def _extract_title_text(page: Page) -> str:
         try:
             return page.title().strip()
-        except Exception as exc:
-            logger.debug("读取页面标题失败，按空字符串处理: {}", exc)
+        except Exception:
             return ""
 
     def _looks_like_shell_page(self, page: Page) -> bool:
         body_text = self._extract_body_text(page)
-        if not body_text:
-            return True
-
-        return looks_like_loading_text(body_text, max_length=_SHELL_TEXT_MAX_LENGTH)
+        return not body_text or looks_like_loading_text(body_text, max_length=_SHELL_TEXT_MAX_LENGTH)
 
     def _looks_like_challenge_page(
         self,
@@ -203,7 +208,6 @@ class PlaywrightFetcher(BaseFetcher):
         title_text = self._extract_title_text(page)
         body_text = self._extract_body_text(page)
         combined_text = "\n".join(part for part in (title_text, body_text) if part)
-
         if looks_like_challenge_text(combined_text):
             return True
         if headers_indicate_challenge(headers):
@@ -214,9 +218,8 @@ class PlaywrightFetcher(BaseFetcher):
     def _warm_up_page(page: Page) -> None:
         try:
             page.mouse.move(240, 180)
-        except Exception as exc:
-            logger.debug("页面鼠标预热失败: {}", exc)
-
+        except Exception:
+            pass
         try:
             page.evaluate(
                 """
@@ -227,22 +230,19 @@ class PlaywrightFetcher(BaseFetcher):
                 }
                 """
             )
-        except Exception as exc:
-            logger.debug("页面滚动预热失败: {}", exc)
-
+        except Exception:
+            pass
         try:
             page.wait_for_timeout(600)
-        except Exception as exc:
-            logger.debug("页面预热等待失败: {}", exc)
+        except Exception:
+            pass
 
     def _wait_for_meaningful_content(self, page: Page) -> None:
         deadline = time.time() + min(max(self._config.wait_after_load / 1000, 2), 12)
-
         while time.time() < deadline:
             body_text = self._extract_body_text(page)
             if len(body_text) >= 80 and not looks_like_loading_text(body_text):
                 return
-
             page.wait_for_timeout(500)
 
     def _stabilize_page(
@@ -253,8 +253,8 @@ class PlaywrightFetcher(BaseFetcher):
         status_code: int = 0,
         headers: dict[str, str] | None = None,
     ) -> int:
-        max_attempts = max(1, int(self._config.challenge_retry_attempts))
-        retry_count = 0
+        max_attempts = max(1, int(self._config.challenge_retry_attempts or 1))
+        reload_count = 0
         for attempt in range(1, max_attempts + 1):
             self._wait_for_meaningful_content(page)
             if not self._looks_like_shell_page(page) and not self._looks_like_challenge_page(
@@ -262,32 +262,123 @@ class PlaywrightFetcher(BaseFetcher):
                 status_code=status_code,
                 headers=headers,
             ):
-                return retry_count
-
+                return reload_count
             if attempt >= max_attempts:
-                logger.warning("页面仍处于壳页或挑战页状态: {}", url)
-                return retry_count
-
-            logger.info("检测到页面仍为壳页或挑战页，执行预热并重试: {} attempt={}", url, attempt + 1)
+                return reload_count
+            logger.info(
+                "PlaywrightFetcher 检测到挑战页/壳页，执行站内恢复: url={} reload_attempt={}",
+                url,
+                attempt,
+            )
             self._warm_up_page(page)
             if self._config.challenge_retry_backoff_ms > 0:
                 page.wait_for_timeout(self._config.challenge_retry_backoff_ms)
             page.reload(timeout=self._config.timeout, wait_until="domcontentloaded")
-            retry_count += 1
             try:
                 page.wait_for_load_state("networkidle", timeout=min(self._config.timeout, 5000))
             except Exception:
-                logger.debug("页面重载后等待 networkidle 超时，继续处理")
-        return retry_count
+                pass
+            reload_count += 1
+        return reload_count
 
-    def fetch(self, url: str) -> FetchResult:
-        start_time = time.time()
-        page = None
-
+    def _save_screenshot(self, page: Page, url: str, *, suffix: str = "") -> None:
         try:
-            page = self._create_page()
-            logger.info("正在抓取: {}", url)
+            screenshot_dir = Path(self._config.screenshot_dir)
+            screenshot_dir.mkdir(parents=True, exist_ok=True)
+            url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{timestamp}_{url_hash}"
+            if suffix:
+                filename = f"{filename}_{suffix}"
+            page.screenshot(path=str(screenshot_dir / f"{filename}.png"), full_page=True)
+        except Exception as exc:
+            logger.warning("截图保存失败: {}", exc)
 
+    def _assess_page(
+        self,
+        page: Page,
+        *,
+        status_code: int,
+        headers: dict[str, str] | None,
+    ) -> ChallengeAssessment:
+        title_text = self._extract_title_text(page)
+        body_text = self._extract_body_text(page)
+        combined_text = "\n".join(part for part in (title_text, body_text) if part)
+        return assess_challenge(
+            text=combined_text,
+            headers=headers,
+            status_code=status_code,
+        )
+
+    def _launch_attempt_context(
+        self,
+        attempt: AccessAttempt,
+        *,
+        user_agent: str,
+    ) -> tuple[BrowserContext, Browser | None, bool]:
+        playwright = self._ensure_playwright()
+        proxy_options = self._build_proxy_options(attempt.proxy_url or None)
+        profile_dir = self._resolve_persistent_context_dir(attempt.profile_dir)
+        if profile_dir is not None:
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=self._config.headless,
+                args=self._build_launch_args(),
+                proxy=proxy_options,
+                **self._build_context_options(
+                    user_agent,
+                    include_storage_state=False,
+                ),
+            )
+            context.add_init_script(_ANTI_DETECT_SCRIPT)
+            return context, context.browser, True
+
+        browser = playwright.chromium.launch(
+            headless=self._config.headless,
+            args=self._build_launch_args(),
+            proxy=proxy_options,
+        )
+        context = browser.new_context(
+            **self._build_context_options(
+                user_agent,
+                include_storage_state=True,
+                storage_state_path=attempt.storage_state_path,
+            )
+        )
+        context.add_init_script(_ANTI_DETECT_SCRIPT)
+        return context, browser, False
+
+    def _fetch_dynamic_attempt(
+        self,
+        url: str,
+        *,
+        attempt: AccessAttempt,
+        retry_count_offset: int,
+        overall_start: float,
+    ) -> tuple[FetchResult, ChallengeAssessment]:
+        context: BrowserContext | None = None
+        browser: Browser | None = None
+        persistent_context = False
+        page: Page | None = None
+        try:
+            user_agent = self._config.user_agent or get_random_user_agent()
+            create_page_method = getattr(self, "_create_page")
+            default_create_page = (
+                getattr(create_page_method, "__self__", None) is self
+                and getattr(create_page_method, "__func__", None) is PlaywrightFetcher._create_page
+            )
+            if default_create_page:
+                context, browser, persistent_context = self._launch_attempt_context(
+                    attempt,
+                    user_agent=user_agent,
+                )
+                page = self._create_page(context)
+            else:
+                try:
+                    page = create_page_method()
+                except TypeError:
+                    page = create_page_method(None)
             response = page.goto(
                 url,
                 timeout=self._config.timeout,
@@ -295,102 +386,165 @@ class PlaywrightFetcher(BaseFetcher):
             )
             status_code = response.status if response else 0
             headers = dict(response.headers) if response else {}
-
             try:
                 page.wait_for_load_state("networkidle", timeout=min(self._config.timeout, 5000))
             except Exception:
-                logger.debug("等待 networkidle 超时，继续处理")
+                pass
 
-            retry_count = self._stabilize_page(
-                page,
-                url,
-                status_code=status_code,
-                headers=headers,
+            reload_count = int(
+                self._stabilize_page(
+                    page,
+                    url,
+                    status_code=status_code,
+                    headers=headers,
+                )
+                or 0
             )
-
             if self._config.wait_after_load > 0:
                 page.wait_for_timeout(self._config.wait_after_load)
-
             try:
                 page.wait_for_selector("body", timeout=5000)
             except Exception:
-                logger.debug("等待 body 超时，继续处理")
+                pass
 
-            is_shell_page = self._looks_like_shell_page(page) or self._looks_like_challenge_page(
+            if self._config.screenshot:
+                self._save_screenshot(page, url, suffix=f"attempt{attempt.attempt_no}")
+
+            html = page.content()
+            assessment = self._assess_page(
                 page,
                 status_code=status_code,
                 headers=headers,
             )
-
-            if self._config.screenshot:
-                self._save_screenshot(page, url)
-
-            html = page.content()
-            self._persist_storage_state()
-            elapsed = (time.time() - start_time) * 1000
-
-            logger.info(
-                "抓取成功: {} (状态码={}, HTML长度={}, 耗时={:.0f}ms)",
-                url,
-                status_code,
-                len(html),
-                elapsed,
-            )
-            if is_shell_page:
-                logger.warning("抓取完成但页面仍疑似壳页: {}", url)
-
-            return FetchResult(
+            if context is not None:
+                self._persist_storage_state(
+                    context,
+                    storage_state_path=attempt.storage_state_path,
+                )
+            result = FetchResult(
                 url=url,
                 html=html,
                 status_code=status_code,
                 headers=headers,
-                elapsed_ms=elapsed,
-                is_shell_page=is_shell_page,
-                retry_count=retry_count,
+                elapsed_ms=(time.perf_counter() - overall_start) * 1000,
+                is_shell_page=assessment.shell_page or assessment.challenge,
+                retry_count=retry_count_offset + reload_count,
             )
+            return result, assessment
         except Exception as exc:
-            elapsed = (time.time() - start_time) * 1000
-            error_msg = f"{type(exc).__name__}: {exc}"
-            logger.error("抓取失败: {} - {}", url, error_msg)
-            return FetchResult(
+            error_message = f"{type(exc).__name__}: {exc}"
+            assessment = assess_challenge(error=error_message)
+            result = FetchResult(
                 url=url,
                 status_code=0,
-                error=error_msg,
-                elapsed_ms=elapsed,
-                retry_count=0,
+                error=error_message,
+                elapsed_ms=(time.perf_counter() - overall_start) * 1000,
+                retry_count=retry_count_offset,
             )
+            return result, assessment
         finally:
-            if page:
+            if page is not None:
                 try:
                     page.close()
-                except Exception as exc:
-                    logger.debug("关闭 Playwright 页面失败，已忽略: {}", exc)
+                except Exception:
+                    pass
+            if context is not None and context is not self._context:
+                try:
+                    self._persist_storage_state(
+                        context,
+                        storage_state_path=attempt.storage_state_path,
+                    )
+                    context.close()
+                except Exception:
+                    pass
+            if browser is not None and not persistent_context and browser is not self._browser:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
-    def _save_screenshot(self, page: Page, url: str) -> None:
+    def _fetch_static_fallback(
+        self,
+        url: str,
+        *,
+        attempt: AccessAttempt,
+        retry_count_offset: int,
+    ) -> tuple[FetchResult, ChallengeAssessment]:
+        static_config = self._config.model_copy(
+            update={
+                "proxy_url": attempt.proxy_url or None,
+                "proxy_urls": [],
+                "fetch_max_attempts": 1,
+            }
+        )
+        fetcher = StaticFetcher(static_config)
         try:
-            screenshot_dir = Path(self._config.screenshot_dir)
-            screenshot_dir.mkdir(parents=True, exist_ok=True)
+            result = fetcher.fetch(url)
+        finally:
+            fetcher.close()
+        result.retry_count += retry_count_offset
+        assessment = assess_challenge(
+            text=result.html[:4000],
+            headers=result.headers,
+            status_code=result.status_code,
+            error=result.error or "",
+        )
+        return result, assessment
 
-            import hashlib
+    def fetch(self, url: str) -> FetchResult:
+        overall_start = time.perf_counter()
+        attempts = build_access_attempts(url, self._config, prefer_dynamic=True)
+        last_result: FetchResult | None = None
 
-            url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = screenshot_dir / f"{timestamp}_{url_hash}.png"
-            page.screenshot(path=str(filepath), full_page=True)
-            logger.info("截图已保存: {}", filepath)
-        except Exception as exc:
-            logger.warning("截图保存失败: {}", exc)
+        for attempt_index, attempt in enumerate(attempts, start=1):
+            logger.info(
+                "PlaywrightFetcher 抓取开始: url={} attempt={} mode={} proxy={} session_slot={} profile_slot={}",
+                url,
+                attempt_index,
+                attempt.fetcher_mode,
+                attempt.masked_proxy_url or "direct",
+                attempt.session_slot,
+                attempt.profile_slot,
+            )
+            if attempt.fetcher_mode == "static":
+                result, assessment = self._fetch_static_fallback(
+                    url,
+                    attempt=attempt,
+                    retry_count_offset=attempt_index - 1,
+                )
+            else:
+                result, assessment = self._fetch_dynamic_attempt(
+                    url,
+                    attempt=attempt,
+                    retry_count_offset=attempt_index - 1,
+                    overall_start=overall_start,
+                )
+            last_result = result
+            if not assessment.retryable or attempt_index >= len(attempts):
+                return result
+            logger.warning(
+                "PlaywrightFetcher 将切换到下一个尝试: url={} attempt={} reason={}",
+                url,
+                attempt_index,
+                assessment.reason or "retryable",
+            )
+
+        return last_result or FetchResult(
+            url=url,
+            status_code=0,
+            error="PlaywrightFetcher 未生成任何结果",
+            elapsed_ms=(time.perf_counter() - overall_start) * 1000,
+        )
 
     def close(self) -> None:
-        if self._context:
+        if self._context is not None:
             try:
-                self._persist_storage_state()
+                self._persist_storage_state(self._context)
                 self._context.close()
             except Exception as exc:
                 logger.debug("关闭 Playwright 上下文失败，已忽略: {}", exc)
             self._context = None
-
-        if self._browser and not self._uses_persistent_context:
+        if self._browser is not None and not self._uses_persistent_context:
             try:
                 self._browser.close()
             except Exception as exc:
@@ -398,14 +552,11 @@ class PlaywrightFetcher(BaseFetcher):
             self._browser = None
         else:
             self._browser = None
-
-        if self._playwright:
+        if self._playwright is not None:
             try:
                 self._playwright.stop()
             except Exception as exc:
                 logger.debug("停止 Playwright 失败，已忽略: {}", exc)
             self._playwright = None
-
         self._initialized = False
         self._uses_persistent_context = False
-        logger.debug("Playwright 资源已释放")

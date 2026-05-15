@@ -275,6 +275,8 @@ def _create_queue_table(conn) -> None:
             id {_id_column_sql(getattr(conn, "dialect", "sqlite"))},
             tenant_id TEXT NOT NULL DEFAULT 'default',
             task_id TEXT NOT NULL UNIQUE,
+            backend TEXT NOT NULL DEFAULT 'sqlite',
+            queue_scope TEXT NOT NULL DEFAULT '*',
             payload_json TEXT NOT NULL DEFAULT '{{}}',
             status TEXT NOT NULL DEFAULT 'queued',
             created_at TEXT NOT NULL,
@@ -293,6 +295,20 @@ def _create_queue_table(conn) -> None:
         "tenant_id",
         "tenant_id TEXT NOT NULL DEFAULT 'default'",
     )
+    ensure_column(
+        conn,
+        "web_task_dispatch_queue",
+        columns,
+        "backend",
+        "backend TEXT NOT NULL DEFAULT 'sqlite'",
+    )
+    ensure_column(
+        conn,
+        "web_task_dispatch_queue",
+        columns,
+        "queue_scope",
+        "queue_scope TEXT NOT NULL DEFAULT '*'",
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_web_task_dispatch_queue_tenant_id ON web_task_dispatch_queue(tenant_id)"
     )
@@ -301,6 +317,9 @@ def _create_queue_table(conn) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_web_task_dispatch_queue_updated_at ON web_task_dispatch_queue(updated_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_web_task_dispatch_queue_backend_scope ON web_task_dispatch_queue(backend, queue_scope, status)"
     )
 
 

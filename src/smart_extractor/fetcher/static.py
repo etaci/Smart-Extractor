@@ -1,133 +1,142 @@
-"""
-静态网页抓取器
+"""Static HTTP fetcher with proxy rotation and challenge-aware retry."""
 
-使用 httpx 进行轻量级的静态页面抓取，
-适用于不需要 JavaScript 渲染的简单页面。
-"""
+from __future__ import annotations
 
 import time
 from typing import Optional
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from loguru import logger
 
 from smart_extractor.config import FetcherConfig
 from smart_extractor.fetcher.base import BaseFetcher, FetchResult
-from smart_extractor.utils.anti_detect import get_random_user_agent
+from smart_extractor.utils.anti_detect import (
+    assess_challenge,
+    build_access_attempts,
+    get_random_user_agent,
+    mask_proxy_url,
+)
 
 
 class StaticFetcher(BaseFetcher):
-    """
-    基于 httpx 的轻量级静态页面抓取器。
-
-    相比 Playwright 更快速、资源消耗更低，
-    但不支持 JavaScript 渲染。
-    """
+    """HTTPX-based fetcher with proxy-pool retry and challenge detection."""
 
     def __init__(self, config: Optional[FetcherConfig] = None):
         self._config = config or FetcherConfig()
-        self._client: Optional[httpx.Client] = None
+        self._clients: dict[str, httpx.Client] = {}
 
-    @staticmethod
-    def _mask_proxy_url(proxy_url: str) -> str:
-        normalized_url = str(proxy_url or "").strip()
-        if not normalized_url:
-            return ""
-        parts = urlsplit(normalized_url)
-        hostname = parts.hostname or ""
-        if not hostname:
-            return normalized_url
-        credentials = ""
-        if parts.username:
-            credentials = f"{parts.username}:***@"
-        netloc = f"{credentials}{hostname}"
-        if parts.port:
-            netloc = f"{netloc}:{parts.port}"
-        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    def _client_key(self, proxy_url: str | None = None) -> str:
+        return str(proxy_url or self._config.proxy_url or "").strip()
 
-    def _ensure_client(self) -> httpx.Client:
-        """确保 httpx 客户端已初始化"""
-        if self._client is None:
-            if not self._config.verify_ssl:
-                logger.warning("静态抓取器已关闭 HTTPS 证书校验，仅建议用于受控环境排障")
-            client_kwargs = {
-                "timeout": self._config.timeout / 1000,
-                "follow_redirects": True,
-                "verify": self._config.verify_ssl,
-            }
-            proxy_url = str(self._config.proxy_url or "").strip()
-            if proxy_url:
-                logger.info("静态抓取使用代理: {}", self._mask_proxy_url(proxy_url))
-                client_kwargs["proxy"] = proxy_url
-            self._client = httpx.Client(**client_kwargs)
-        return self._client
+    def _ensure_client(self, proxy_url: str | None = None) -> httpx.Client:
+        key = self._client_key(proxy_url)
+        client = self._clients.get(key)
+        if client is not None:
+            return client
+        if not self._config.verify_ssl:
+            logger.warning("StaticFetcher 已关闭 HTTPS 证书校验，仅建议在受控环境排障时使用")
+        client_kwargs = {
+            "timeout": self._config.timeout / 1000,
+            "follow_redirects": True,
+            "verify": self._config.verify_ssl,
+        }
+        if key:
+            client_kwargs["proxy"] = key
+            logger.info("StaticFetcher 使用代理: {}", mask_proxy_url(key))
+        client = httpx.Client(**client_kwargs)
+        self._clients[key] = client
+        return client
+
+    def _build_headers(self) -> dict[str, str]:
+        return {
+            "User-Agent": self._config.user_agent or get_random_user_agent(),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
 
     def fetch(self, url: str) -> FetchResult:
-        """
-        抓取指定 URL 的静态页面内容。
+        overall_start = time.perf_counter()
+        attempts = build_access_attempts(url, self._config, prefer_dynamic=False)
+        last_result: FetchResult | None = None
 
-        Args:
-            url: 目标网页 URL
-
-        Returns:
-            FetchResult 包含 HTML 和状态信息
-        """
-        start_time = time.time()
-
-        try:
-            client = self._ensure_client()
-            user_agent = self._config.user_agent or get_random_user_agent()
-
-            logger.info("正在抓取（静态模式）: {}", url)
-
-            response = client.get(
-                url,
-                headers={
-                    "User-Agent": user_agent,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                    "Accept-Encoding": "gzip, deflate",
-                },
-            )
-
-            elapsed = (time.time() - start_time) * 1000
-            html = response.text
-            headers = dict(response.headers)
-
+        for attempt_index, attempt in enumerate(attempts, start=1):
+            attempt_start = time.perf_counter()
             logger.info(
-                "抓取成功: {} (状态码={}, HTML长度={}, 耗时={:.0f}ms)",
-                url, response.status_code, len(html), elapsed
+                "StaticFetcher 抓取开始: url={} attempt={} proxy={}",
+                url,
+                attempt_index,
+                attempt.masked_proxy_url or "direct",
             )
+            try:
+                client = self._ensure_client(attempt.proxy_url or None)
+                response = client.get(url, headers=self._build_headers())
+                html = response.text
+                headers = dict(response.headers)
+                assessment = assess_challenge(
+                    text=html[:4000],
+                    headers=headers,
+                    status_code=response.status_code,
+                )
+                last_result = FetchResult(
+                    url=url,
+                    html=html,
+                    status_code=response.status_code,
+                    headers=headers,
+                    elapsed_ms=(time.perf_counter() - overall_start) * 1000,
+                    is_shell_page=assessment.shell_page or assessment.challenge,
+                    retry_count=attempt_index - 1,
+                )
+                if assessment.retryable and attempt_index < len(attempts):
+                    logger.warning(
+                        "StaticFetcher 命中挑战/壳页，继续下一个尝试: url={} attempt={} reason={}",
+                        url,
+                        attempt_index,
+                        assessment.reason or "retryable",
+                    )
+                    continue
+                return last_result
+            except Exception as exc:
+                error_message = f"{type(exc).__name__}: {exc}"
+                assessment = assess_challenge(error=error_message)
+                last_result = FetchResult(
+                    url=url,
+                    status_code=0,
+                    error=error_message,
+                    elapsed_ms=(time.perf_counter() - overall_start) * 1000,
+                    retry_count=attempt_index - 1,
+                )
+                logger.warning(
+                    "StaticFetcher 抓取失败: url={} attempt={} proxy={} error={}",
+                    url,
+                    attempt_index,
+                    attempt.masked_proxy_url or "direct",
+                    error_message,
+                )
+                if assessment.retryable and attempt_index < len(attempts):
+                    continue
+                return last_result
+            finally:
+                logger.debug(
+                    "StaticFetcher 单次尝试结束: url={} attempt={} elapsed_ms={:.0f}",
+                    url,
+                    attempt_index,
+                    (time.perf_counter() - attempt_start) * 1000,
+                )
 
-            return FetchResult(
-                url=url,
-                html=html,
-                status_code=response.status_code,
-                headers=headers,
-                elapsed_ms=elapsed,
-                retry_count=0,
-            )
-
-        except Exception as e:
-            elapsed = (time.time() - start_time) * 1000
-            error_msg = f"{type(e).__name__}: {e}"
-            logger.error("抓取失败: {} — {}", url, error_msg)
-
-            return FetchResult(
-                url=url,
-                status_code=0,
-                error=error_msg,
-                elapsed_ms=elapsed,
-                retry_count=0,
-            )
+        return last_result or FetchResult(
+            url=url,
+            status_code=0,
+            error="StaticFetcher 未生成任何结果",
+            elapsed_ms=(time.perf_counter() - overall_start) * 1000,
+        )
 
     def close(self) -> None:
-        """关闭 httpx 客户端"""
-        if self._client:
+        for client in list(self._clients.values()):
             try:
-                self._client.close()
+                client.close()
             except Exception as exc:
                 logger.debug("关闭 httpx 客户端失败，已忽略: {}", exc)
-            self._client = None
-            logger.debug("httpx 客户端已关闭")
+        self._clients.clear()

@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
     app.state.notification_digest_service = None
 
     if (
-        str(config.web.task_dispatch_mode or "").strip().lower() == "queue"
+        str(config.web.task_dispatch_mode or "").strip().lower() in {"queue", "redis"}
         and config.web.start_builtin_worker
     ):
         from smart_extractor.web.routes import create_managed_task_worker

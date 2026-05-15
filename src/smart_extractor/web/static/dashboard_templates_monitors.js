@@ -400,6 +400,134 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
     });
   }
 
+  function renderActorMarketBoard(actors) {
+    const items =
+      Array.isArray(actors) && actors.length
+        ? actors
+        : [
+            {
+              actor_id: "market-product-monitor-actor",
+              name: "商品价格监控 Actor",
+              description: "安装后可快速生成价格、库存、卖点变化监控能力包。",
+              category: "commerce",
+              tags: ["price", "monitor"],
+              version: "内置",
+            },
+            {
+              actor_id: "market-policy-watch-actor",
+              name: "政策公告追踪 Actor",
+              description: "面向公告、政策、帮助中心页面的持续追踪与通知能力包。",
+              category: "policy",
+              tags: ["notice", "alert"],
+              version: "内置",
+            },
+          ];
+    renderInsightList(
+      "actor-market-board",
+      items,
+      "当前还没有可安装 Actor。刷新市场后会展示业务能力包。",
+      (item) => `
+        <div class="insight-item">
+          <div class="insight-item-row">
+            <div>
+              <span class="insight-title">${escHtml(item.name || item.actor_id || item.id || "Actor")}</span>
+              <p>${escHtml(item.description || item.summary || "可安装为业务能力包")}</p>
+              <p class="panel-note">${escHtml(joinParts([
+                item.category || "能力包",
+                (item.tags || []).map((tag) => `#${tag}`).join(" "),
+                item.version ? `版本 ${item.version}` : "",
+              ]))}</p>
+            </div>
+            <div class="insight-side">
+              <strong>${escHtml(item.category || "Actor")}</strong>
+              ${
+                item.version === "内置"
+                  ? `<span class="badge badge-pending">${escHtml(item.version)}</span>`
+                  : `<button class="btn btn-ghost btn-inline" type="button" data-install-actor="${escHtml(
+                      item.actor_id || item.id || ""
+                    )}">安装</button>`
+              }
+            </div>
+          </div>
+        </div>
+      `
+    );
+
+    document.querySelectorAll("[data-install-actor]").forEach((button) => {
+      button.addEventListener("click", () => installActor(button.dataset.installActor || ""));
+    });
+  }
+
+  function renderInstalledActorBoard(actors) {
+    const items =
+      Array.isArray(actors) && actors.length
+        ? actors
+        : [
+            {
+              actor_id: "pending-install",
+              name: "尚未安装 Actor",
+              description: "从左侧市场安装后，这里会显示可复用的业务能力包。",
+              category: "待安装",
+              status: "ready",
+            },
+          ];
+    renderInsightList(
+      "actor-installed-board",
+      items,
+      "当前还没有已安装 Actor。",
+      (item) => `
+        <div class="insight-item insight-item-row">
+          <div>
+            <span class="insight-title">${escHtml(item.name || item.actor_id || item.id || "Actor")}</span>
+            <p>${escHtml(item.description || item.summary || "已安装能力包")}</p>
+            <p class="panel-note">${escHtml(joinParts([
+              item.status_label || item.status || "可用",
+              item.created_at || item.installed_at || "",
+            ]))}</p>
+          </div>
+          <div class="insight-side">
+            <strong>${escHtml(item.category || "Actor")}</strong>
+          </div>
+        </div>
+      `
+    );
+  }
+
+  async function loadActorAssets(showFeedback = false) {
+    const [marketData, installedData] = await Promise.all([
+      fetchJsonOrNull("/api/actor_market"),
+      fetchJsonOrNull("/api/actors"),
+    ]);
+    const marketActors = marketData
+      ? marketData.actors || marketData.actor_market || marketData.items || []
+      : [];
+    const installedActors = installedData
+      ? installedData.actors || installedData.installed_actors || installedData.items || []
+      : [];
+    renderActorMarketBoard(marketActors);
+    renderInstalledActorBoard(installedActors);
+    if (showFeedback) {
+      showToast("Actor 市场已刷新", "success");
+    }
+  }
+
+  async function installActor(actorId) {
+    if (!actorId) return;
+    const response = await apiFetch("/api/actor_market/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actor_id: actorId }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      showToast(`Actor 安装失败：${data.detail || "未知错误"}`, "error");
+      return;
+    }
+    showToast("Actor 已安装", "success");
+    await loadActorAssets();
+    await refreshDashboard();
+  }
+
   async function loadTemplates(showFeedback = false) {
     const data = await fetchJsonOrNull("/api/templates");
     if (!data) {
@@ -570,8 +698,11 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
     renderMonitorAlerts,
     renderMonitorBoard,
     renderNotificationBoard,
+    renderActorMarketBoard,
+    renderInstalledActorBoard,
     loadTemplates,
     loadMarketTemplates,
+    loadActorAssets,
     loadMonitors,
     loadNotifications,
     applyTemplate,
@@ -581,5 +712,6 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
     pauseMonitor,
     resumeMonitor,
     resendNotification,
+    installActor,
   };
 };

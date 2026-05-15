@@ -100,6 +100,10 @@ def update_llm_basic_config(
         }
     )
     config_data["llm"] = llm_data
+    if config_secret_key:
+        security_data = dict(config_data.get("security", {}))
+        security_data["config_secret_key"] = str(config_secret_key)
+        config_data["security"] = security_data
     return save_raw_yaml_config(config_data, config_path)
 
 
@@ -139,6 +143,10 @@ class FetcherConfig(BaseSettings):
     screenshot_dir: str = Field(default="screenshots", description="截图保存目录")
     user_agent: Optional[str] = Field(default=None, description="自定义 User-Agent")
     proxy_url: Optional[str] = Field(default=None, description="抓取阶段使用的代理 URL")
+    proxy_urls: list[str] = Field(
+        default_factory=list,
+        description="抓取阶段可轮换使用的代理 URL 列表",
+    )
     storage_state_path: Optional[str] = Field(
         default=None, description="Playwright storage_state 文件路径"
     )
@@ -150,6 +158,26 @@ class FetcherConfig(BaseSettings):
     )
     challenge_retry_backoff_ms: int = Field(
         default=1500, description="反爬/挑战页再次尝试前的等待时间，毫秒"
+    )
+    browser_session_pool_size: int = Field(
+        default=2,
+        description="动态抓取浏览器会话池大小",
+    )
+    persistent_profile_pool_size: int = Field(
+        default=1,
+        description="持久化浏览器 Profile 池大小",
+    )
+    proxy_rotation_enabled: bool = Field(
+        default=True,
+        description="是否在多代理场景下自动轮换代理",
+    )
+    fetch_max_attempts: int = Field(
+        default=3,
+        description="抓取器跨代理/跨会话的最大总尝试次数",
+    )
+    challenge_fallback_to_static: bool = Field(
+        default=True,
+        description="动态抓取疑似被拦截时是否自动回退到静态抓取",
     )
 
 
@@ -247,11 +275,27 @@ class WebConfig(BaseSettings):
     )
     task_dispatch_mode: str = Field(
         default="inline",
-        description="Web 任务分发模式：inline 或 queue",
+        description="Web 任务分发模式：inline、queue 或 redis",
+    )
+    redis_url: str = Field(
+        default="",
+        description="Redis 队列连接地址，task_dispatch_mode=redis 时使用",
+    )
+    redis_queue_name: str = Field(
+        default="smart-extractor:dispatch",
+        description="Redis 队列名称前缀",
+    )
+    redis_visibility_timeout_seconds: float = Field(
+        default=300.0,
+        description="Redis 队列任务可见性超时，单位秒",
     )
     start_builtin_worker: bool = Field(
         default=False,
         description="队列模式下是否在 Web 进程内启动内置 worker",
+    )
+    worker_queue_scope: str = Field(
+        default="*",
+        description="Worker 可消费的队列范围；* 表示全部，其他值表示指定 worker group",
     )
     worker_poll_interval_seconds: float = Field(
         default=2.0,
@@ -393,11 +437,27 @@ class AppConfig(BaseSettings):
         env_fetcher_locale = os.environ.get("SMART_EXTRACTOR_FETCHER_LOCALE", "")
         env_fetcher_timezone = os.environ.get("SMART_EXTRACTOR_FETCHER_TIMEZONE_ID", "")
         env_fetcher_proxy_url = os.environ.get("SMART_EXTRACTOR_FETCHER_PROXY_URL", "")
+        env_fetcher_proxy_urls = os.environ.get("SMART_EXTRACTOR_FETCHER_PROXY_URLS", "")
         env_fetcher_storage_state = os.environ.get(
             "SMART_EXTRACTOR_FETCHER_STORAGE_STATE_PATH", ""
         )
         env_fetcher_persistent_context = os.environ.get(
             "SMART_EXTRACTOR_FETCHER_PERSISTENT_CONTEXT_DIR", ""
+        )
+        env_fetcher_browser_session_pool_size = os.environ.get(
+            "SMART_EXTRACTOR_FETCHER_BROWSER_SESSION_POOL_SIZE", ""
+        )
+        env_fetcher_persistent_profile_pool_size = os.environ.get(
+            "SMART_EXTRACTOR_FETCHER_PERSISTENT_PROFILE_POOL_SIZE", ""
+        )
+        env_fetcher_proxy_rotation_enabled = os.environ.get(
+            "SMART_EXTRACTOR_FETCHER_PROXY_ROTATION_ENABLED", ""
+        )
+        env_fetcher_fetch_max_attempts = os.environ.get(
+            "SMART_EXTRACTOR_FETCHER_FETCH_MAX_ATTEMPTS", ""
+        )
+        env_fetcher_challenge_fallback_to_static = os.environ.get(
+            "SMART_EXTRACTOR_FETCHER_CHALLENGE_FALLBACK_TO_STATIC", ""
         )
         env_storage_sqlite_busy_timeout_ms = os.environ.get(
             "SMART_EXTRACTOR_STORAGE_SQLITE_BUSY_TIMEOUT_MS", ""
@@ -437,8 +497,18 @@ class AppConfig(BaseSettings):
         env_web_dispatch_mode = os.environ.get(
             "SMART_EXTRACTOR_WEB_TASK_DISPATCH_MODE", ""
         )
+        env_web_redis_url = os.environ.get("SMART_EXTRACTOR_WEB_REDIS_URL", "")
+        env_web_redis_queue_name = os.environ.get(
+            "SMART_EXTRACTOR_WEB_REDIS_QUEUE_NAME", ""
+        )
+        env_web_redis_visibility_timeout = os.environ.get(
+            "SMART_EXTRACTOR_WEB_REDIS_VISIBILITY_TIMEOUT_SECONDS", ""
+        )
         env_web_start_builtin_worker = os.environ.get(
             "SMART_EXTRACTOR_WEB_START_BUILTIN_WORKER", ""
+        )
+        env_web_worker_queue_scope = os.environ.get(
+            "SMART_EXTRACTOR_WEB_WORKER_QUEUE_SCOPE", ""
         )
         env_web_worker_poll = os.environ.get(
             "SMART_EXTRACTOR_WEB_WORKER_POLL_INTERVAL_SECONDS", ""
@@ -531,6 +601,7 @@ class AppConfig(BaseSettings):
         encrypted_api_key = str(llm_data.get("api_key_encrypted", "") or "").strip()
         if not env_api_key and encrypted_api_key and config_secret_key:
             llm_data["api_key"] = decrypt_secret(config_secret_key, encrypted_api_key)
+        llm_data.pop("api_key_encrypted", None)
 
         fetcher_data = merged_config.get("fetcher", {})
         if env_fetcher_verify_ssl:
@@ -541,10 +612,41 @@ class AppConfig(BaseSettings):
             fetcher_data["timezone_id"] = env_fetcher_timezone
         if env_fetcher_proxy_url:
             fetcher_data["proxy_url"] = env_fetcher_proxy_url
+        if env_fetcher_proxy_urls:
+            fetcher_data["proxy_urls"] = _parse_csv_list(env_fetcher_proxy_urls)
         if env_fetcher_storage_state:
             fetcher_data["storage_state_path"] = env_fetcher_storage_state
         if env_fetcher_persistent_context:
             fetcher_data["persistent_context_dir"] = env_fetcher_persistent_context
+        if env_fetcher_browser_session_pool_size:
+            try:
+                fetcher_data["browser_session_pool_size"] = int(
+                    env_fetcher_browser_session_pool_size
+                )
+            except ValueError:
+                pass
+        if env_fetcher_persistent_profile_pool_size:
+            try:
+                fetcher_data["persistent_profile_pool_size"] = int(
+                    env_fetcher_persistent_profile_pool_size
+                )
+            except ValueError:
+                pass
+        if env_fetcher_proxy_rotation_enabled:
+            fetcher_data["proxy_rotation_enabled"] = _parse_bool(
+                env_fetcher_proxy_rotation_enabled
+            )
+        if env_fetcher_fetch_max_attempts:
+            try:
+                fetcher_data["fetch_max_attempts"] = int(
+                    env_fetcher_fetch_max_attempts
+                )
+            except ValueError:
+                pass
+        if env_fetcher_challenge_fallback_to_static:
+            fetcher_data["challenge_fallback_to_static"] = _parse_bool(
+                env_fetcher_challenge_fallback_to_static
+            )
 
         storage_data = merged_config.get("storage", {})
         if env_storage_sqlite_busy_timeout_ms:
@@ -594,10 +696,23 @@ class AppConfig(BaseSettings):
             )
         if env_web_dispatch_mode:
             web_data["task_dispatch_mode"] = env_web_dispatch_mode
+        if env_web_redis_url:
+            web_data["redis_url"] = env_web_redis_url
+        if env_web_redis_queue_name:
+            web_data["redis_queue_name"] = env_web_redis_queue_name
+        if env_web_redis_visibility_timeout:
+            try:
+                web_data["redis_visibility_timeout_seconds"] = float(
+                    env_web_redis_visibility_timeout
+                )
+            except ValueError:
+                pass
         if env_web_start_builtin_worker:
             web_data["start_builtin_worker"] = _parse_bool(
                 env_web_start_builtin_worker
             )
+        if env_web_worker_queue_scope:
+            web_data["worker_queue_scope"] = env_web_worker_queue_scope
         if env_web_worker_poll:
             try:
                 web_data["worker_poll_interval_seconds"] = float(env_web_worker_poll)
