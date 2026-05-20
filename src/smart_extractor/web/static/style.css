@@ -1785,6 +1785,86 @@ textarea {
   line-height: 1.45;
 }
 
+.task-status-button {
+  border: 0;
+  cursor: pointer;
+}
+
+.task-status-button:hover {
+  filter: brightness(0.96);
+  transform: translateY(-1px);
+}
+
+.notification-alert-panel {
+  margin-bottom: 14px;
+}
+
+.operational-alert-item {
+  border-color: color-mix(in srgb, var(--warning) 20%, var(--border));
+}
+
+.template-score-table-wrap {
+  overflow-x: auto;
+}
+
+.template-score-table td:first-child {
+  min-width: 220px;
+}
+
+.template-score-table .panel-note {
+  margin-top: 6px;
+}
+
+.diagnosis-open {
+  overflow: hidden;
+}
+
+.diagnosis-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+
+.diagnosis-dialog[hidden] {
+  display: none;
+}
+
+.diagnosis-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 15, 26, 0.44);
+  backdrop-filter: blur(6px);
+}
+
+.diagnosis-dialog-panel {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: min(560px, calc(100vw - 28px));
+  max-height: min(720px, calc(100vh - 28px));
+  overflow-y: auto;
+  transform: translate(-50%, -50%);
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 20px;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+}
+
+.diagnosis-dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.diagnosis-dialog-header h3 {
+  margin: 10px 0 0;
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+}
+
 .url-cell {
   max-width: 320px;
   overflow: hidden;

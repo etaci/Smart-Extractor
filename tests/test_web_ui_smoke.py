@@ -50,6 +50,7 @@ def _dashboard():
         "stats": {"total": 2, "success": 1, "failed": 0, "running": 1, "pending": 0, "success_rate": "50%"},
         "tasks": [
             {"task_id": "task-001", "url": "https://example.com/a", "domain": "example.com", "schema_name": "news", "storage_format": "json", "status": "success", "quality_score": 0.9, "elapsed_ms": 100, "created_at": "2026-04-23", "task_kind": "single", "batch_group_id": "", "total_items": 0, "completed_items": 0, "progress": {"percent": 100, "stage": "done"}},
+            {"task_id": "task-failed", "url": "https://example.com/blocked", "domain": "example.com", "schema_name": "news", "storage_format": "json", "status": "failed", "quality_score": 0.0, "elapsed_ms": 200, "created_at": "2026-04-23", "task_kind": "single", "batch_group_id": "", "total_items": 0, "completed_items": 0, "progress_percent": 100, "progress_stage": "failed", "failure_diagnosis": {"category": "403", "title": "目标站返回 403", "message": "403 forbidden", "suggestion": "切换代理或代理分组。", "severity": "danger", "actionable": True}},
             {"task_id": "task-batch", "url": "batch://demo", "domain": "batch", "schema_name": "auto", "storage_format": "json", "status": "running", "quality_score": 0.0, "elapsed_ms": 0, "created_at": "2026-04-23", "task_kind": "batch", "batch_group_id": "batch-demo", "total_items": 2, "completed_items": 1, "progress": {"percent": 50, "stage": "running"}},
         ],
         "insights": {
@@ -72,6 +73,8 @@ def _dashboard():
             {"monitor_id": "mon-2", "name": "Monitor 2", "url": "https://example.com/p2", "profile": {"scenario_label": "S2", "business_goal": "G2", "alert_focus": "title"}, "business_summary": "Summary", "last_extraction_strategy": "llm", "last_notification_status": "failed", "notification_status_label": "Failed", "alert_label": "Stable", "last_alert_level": "stable", "severity": "low", "severity_label": "Low", "schedule_enabled": True, "schedule_status": "paused", "schedule_status_label": "Paused", "schedule_interval_label": "120m", "last_trigger_source_label": "Scheduler"},
         ],
         "notifications": [{"notification_id": "notif-1", "monitor_id": "mon-1", "status": "failed", "status_label": "Failed", "status_message": "Webhook failed", "error_message": "500", "triggered_by": "manual", "triggered_by_label": "Manual", "channel_type": "webhook", "target": "https://example.com/hook", "created_at": "2026-04-23", "can_resend": True}],
+        "template_scores": {"templates": [{"template_id": "tpl-1", "name": "Tpl", "success_rate": 0.8, "field_correct_rate": 0.9, "field_missing_rate": 0.1, "recent_failure": {"category": "403", "at": "2026-04-23"}, "quality_score": 0.84, "total_count": 5, "field_feedback_count": 3}]},
+        "customer_success": {"automation_alerts": [{"type": "high_failure_rate", "severity": "danger", "tenant_id": "default", "title": "租户失败率偏高", "message": "失败率 40%", "recommended_action": "查看失败自诊断。"}], "quota_watch": [], "failure_watch": [], "top_success_templates": []},
         "learned_profiles": [{"profile_id": "lp-1", "domain": "example.com", "is_active": True, "status_label": "Active", "fields": ["title"], "path_prefixes": ["/p"], "memory_strength_label": "High", "stability_rate": 0.9, "hit_count": 2, "risk_level": "medium"}],
         "runtime_status": _runtime(),
     }
@@ -146,6 +149,10 @@ def _mock_api(page, calls):
             return _fulfill(route, {"templates": _dashboard()["templates"]})
         if path == "/api/template_market":
             return _fulfill(route, {"templates": _dashboard()["market_templates"]})
+        if path == "/api/template_scores":
+            return _fulfill(route, _dashboard()["template_scores"])
+        if path == "/api/customer_success":
+            return _fulfill(route, _dashboard()["customer_success"])
         if path == "/api/actor_market":
             return _fulfill(route, {"actors": [{"actor_id": "actor-commerce", "name": "Commerce Actor", "description": "Install commerce capability", "category": "commerce", "tags": ["price"], "version": "1.0.0"}]})
         if path == "/api/actors":
@@ -264,6 +271,9 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.wait_for_function(
             "() => !document.getElementById('section-tasks').classList.contains('section-hidden')"
         )
+        page.evaluate("document.querySelector('[data-failure-diagnosis]')?.click()")
+        page.wait_for_selector("#failure-diagnosis-dialog:not([hidden])")
+        page.click("button[data-close-failure-diagnosis]")
         page.click("#load-quality-btn")
         page.click("#load-cost-btn")
         page.click("#load-audit-btn")
@@ -277,6 +287,7 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.select_option("#learned-profile-filter", "risky")
         page.select_option("#notification-filter", "failed")
         page.click(".nav-item[data-section='ops-assets']")
+        page.click("#template-score-refresh-btn")
         page.click("#actor-market-refresh-btn")
         page.click(".nav-item[data-section='backoffice']")
         page.click("#backoffice-refresh-btn")
@@ -430,6 +441,7 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
     assert any(call.startswith("POST /api/batch") for call in calls)
     assert any(call.startswith("POST /api/analyze_insight") for call in calls)
     assert any(call.startswith("POST /api/analyze_compare") for call in calls)
+    assert any(call.startswith("GET /api/template_scores") for call in calls)
     assert page_errors == []
     assert console_errors == []
 

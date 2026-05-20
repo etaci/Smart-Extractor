@@ -29,6 +29,29 @@ _FIELD_ALIASES: dict[str, list[str]] = {
     "content": ["正文", "内容", "详情", "介绍", "content"],
 }
 
+_FIELD_ALIASES.update(
+    {
+        "title": [*_FIELD_ALIASES.get("title", []), "headline", "heading"],
+        "name": [*_FIELD_ALIASES.get("name", []), "product name", "item name"],
+        "product": ["product", "product name", "service", "sku"],
+        "price": [*_FIELD_ALIASES.get("price", []), "pricing", "from"],
+        "availability": ["availability", "available", "stock", "in stock", "status"],
+        "plan": ["plan", "tier", "package", "edition"],
+        "billing_period": ["billing period", "billing", "period", "per"],
+        "date": ["date", "published", "updated", "release date"],
+        "agency": ["agency", "department", "ministry"],
+        "organization": ["organization", "organisation", "org"],
+        "publish_date": [
+            *_FIELD_ALIASES.get("publish_date", []),
+            "date",
+            "published",
+            "updated",
+            "posted",
+        ],
+        "summary": [*_FIELD_ALIASES.get("summary", []), "overview"],
+    }
+)
+
 _DATE_RE = re.compile(
     r"(20\d{2}[-/年]\d{1,2}[-/月]\d{1,2}(?:日)?(?:\s+\d{1,2}:\d{1,2}(?::\d{1,2})?)?)"
 )
@@ -37,6 +60,21 @@ _PRICE_RE = re.compile(
 )
 _SALARY_RE = re.compile(
     r"((?:\d{1,2}(?:\.\d+)?[kKwW万千]?[\-/~至到]\d{1,2}(?:\.\d+)?[kKwW万千]?|(?:¥|\$|￥)?\s?\d{1,6}(?:[.,]\d{1,2})?\s*[-~至到]\s*(?:¥|\$|￥)?\s?\d{1,6}(?:[.,]\d{1,2})?)(?:\s*/\s*(?:月|年))?)"
+)
+
+
+_ASCII_DATE_RE = re.compile(
+    r"\b(?:20\d{2}|19\d{2})[-/.](?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\d|3[01])\b"
+    r"|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},\s+(?:20\d{2}|19\d{2})\b",
+    re.IGNORECASE,
+)
+_ASCII_PRICE_RE = re.compile(
+    r"(?<![\w])((?:[$€£¥]\s?\d{1,6}(?:[.,]\d{1,2})?)|(?:\d{1,6}(?:[.,]\d{1,2})?\s?(?:USD|CNY|RMB|EUR|GBP|/mo|/month|per month|monthly|/yr|/year|annually)))",
+    re.IGNORECASE,
+)
+_BILLING_PERIOD_RE = re.compile(
+    r"\b(per\s+(?:month|year|user|seat)|monthly|annually|annual|/mo|/month|/yr|/year)\b",
+    re.IGNORECASE,
 )
 
 
@@ -136,13 +174,17 @@ class RuleBasedDynamicExtractor:
         if not field_name:
             return ""
         if field_name == "price":
-            return self._extract_first_regex(_PRICE_RE, text)
+            return self._extract_first_regex(_PRICE_RE, text) or self._extract_first_regex(_ASCII_PRICE_RE, text)
         if field_name == "salary_range":
             return self._extract_first_regex(_SALARY_RE, text)
-        if field_name == "publish_date":
-            return self._extract_first_regex(_DATE_RE, text)
+        if field_name in {"publish_date", "date"}:
+            return self._extract_first_regex(_DATE_RE, text) or self._extract_first_regex(_ASCII_DATE_RE, text)
+        if field_name == "billing_period":
+            return self._extract_first_regex(_BILLING_PERIOD_RE, text)
         if field_name == "stock":
             return self._extract_stock(text)
+        if field_name == "availability":
+            return self._extract_availability(text)
 
         aliases = _FIELD_ALIASES.get(field_name, [])
         labeled = self._extract_labeled_value(lines, aliases)
@@ -157,6 +199,8 @@ class RuleBasedDynamicExtractor:
             return self._extract_brand(lines)
         if field_name == "company":
             return self._extract_company(lines)
+        if field_name in {"product", "plan", "agency", "organization"}:
+            return self._extract_short_named_value(field_name, lines)
         return ""
 
     @staticmethod
@@ -184,11 +228,30 @@ class RuleBasedDynamicExtractor:
     @staticmethod
     def _pick_title(lines: list[str]) -> str:
         for line in lines[:8]:
-            if _looks_like_labeled_line(line):
+            if _looks_like_labeled_line(line) or RuleBasedDynamicExtractor._is_noise_heading(line):
                 continue
             if 4 <= len(line) <= 80:
                 return line
         return lines[0] if lines else ""
+
+    @staticmethod
+    def _is_noise_heading(line: str) -> bool:
+        normalized = str(line or "").strip().lower()
+        if not normalized:
+            return True
+        noise_markers = (
+            "skip to",
+            "main content",
+            "cookie",
+            "privacy",
+            "subscribe",
+            "sign in",
+            "log in",
+            "menu",
+            "search",
+            "javascript",
+        )
+        return any(marker in normalized for marker in noise_markers)
 
     @staticmethod
     def _pick_description(lines: list[str], title_like: str) -> str:
@@ -223,6 +286,38 @@ class RuleBasedDynamicExtractor:
         for marker in ("现货", "有货", "库存充足", "可预订", "售罄", "缺货", "无货"):
             if marker in normalized:
                 return marker
+        return ""
+
+    @staticmethod
+    def _extract_availability(text: str) -> str:
+        lowered = str(text or "").lower()
+        for marker in (
+            "in stock",
+            "available",
+            "out of stock",
+            "sold out",
+            "pre-order",
+            "preorder",
+            "鐜拌揣",
+            "鏈夎揣",
+            "缂鸿揣",
+            "鏃犺揣",
+        ):
+            if marker.lower() in lowered:
+                return marker
+        return ""
+
+    @staticmethod
+    def _extract_short_named_value(field_name: str, lines: list[str]) -> str:
+        aliases = _FIELD_ALIASES.get(field_name, [])
+        labeled = RuleBasedDynamicExtractor._extract_labeled_value(lines, aliases)
+        if labeled:
+            return labeled
+        for line in lines[:12]:
+            if RuleBasedDynamicExtractor._is_noise_heading(line):
+                continue
+            if 2 <= len(line) <= 80 and not _looks_like_labeled_line(line):
+                return line
         return ""
 
     @staticmethod

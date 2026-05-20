@@ -55,7 +55,51 @@ class StaticFetcher(BaseFetcher):
             "Accept-Encoding": "gzip, deflate",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
         }
+
+    def _should_escalate_to_dynamic(self, result: FetchResult | None) -> bool:
+        if not bool(getattr(self._config, "static_fallback_to_dynamic", True)):
+            return False
+        if result is None:
+            return True
+        if result.is_shell_page:
+            return True
+        if not result.is_success:
+            return True
+        return result.status_code in {401, 403, 429}
+
+    def _fetch_dynamic_fallback(self, url: str, previous: FetchResult | None) -> FetchResult:
+        try:
+            from smart_extractor.fetcher.playwright import PlaywrightFetcher
+        except Exception as exc:
+            logger.warning("StaticFetcher dynamic fallback unavailable: {}", exc)
+            return previous or FetchResult(url=url, status_code=0, error=str(exc))
+
+        dynamic_config = self._config.model_copy(
+            update={
+                "static_fallback_to_dynamic": False,
+                "challenge_fallback_to_static": False,
+            }
+        )
+        logger.info("StaticFetcher escalating to Playwright: {}", url)
+        fetcher = PlaywrightFetcher(dynamic_config)
+        try:
+            result = fetcher.fetch(url)
+            if previous is not None:
+                result.retry_count += previous.retry_count + 1
+            return result
+        except Exception as exc:
+            logger.warning("StaticFetcher Playwright fallback failed: {}", exc)
+            if previous is not None:
+                return previous
+            return FetchResult(url=url, status_code=0, error=f"{type(exc).__name__}: {exc}")
+        finally:
+            fetcher.close()
 
     def fetch(self, url: str) -> FetchResult:
         overall_start = time.perf_counter()
@@ -97,6 +141,8 @@ class StaticFetcher(BaseFetcher):
                         assessment.reason or "retryable",
                     )
                     continue
+                if assessment.retryable and self._should_escalate_to_dynamic(last_result):
+                    return self._fetch_dynamic_fallback(url, last_result)
                 return last_result
             except Exception as exc:
                 error_message = f"{type(exc).__name__}: {exc}"
@@ -117,6 +163,8 @@ class StaticFetcher(BaseFetcher):
                 )
                 if assessment.retryable and attempt_index < len(attempts):
                     continue
+                if assessment.retryable and self._should_escalate_to_dynamic(last_result):
+                    return self._fetch_dynamic_fallback(url, last_result)
                 return last_result
             finally:
                 logger.debug(
@@ -125,6 +173,9 @@ class StaticFetcher(BaseFetcher):
                     attempt_index,
                     (time.perf_counter() - attempt_start) * 1000,
                 )
+
+        if self._should_escalate_to_dynamic(last_result):
+            return self._fetch_dynamic_fallback(url, last_result)
 
         return last_result or FetchResult(
             url=url,

@@ -128,6 +128,16 @@ class LLMConfig(BaseSettings):
     )
 
 
+    cost_input_per_million: float = Field(
+        default=0.0,
+        description="Optional input-token price override in USD per 1M tokens",
+    )
+    cost_output_per_million: float = Field(
+        default=0.0,
+        description="Optional output-token price override in USD per 1M tokens",
+    )
+
+
 class FetcherConfig(BaseSettings):
     headless: bool = Field(default=True, description="是否使用无头浏览器")
     timeout: int = Field(default=30000, description="页面加载超时，单位毫秒")
@@ -178,6 +188,12 @@ class FetcherConfig(BaseSettings):
     challenge_fallback_to_static: bool = Field(
         default=True,
         description="动态抓取疑似被拦截时是否自动回退到静态抓取",
+    )
+
+
+    static_fallback_to_dynamic: bool = Field(
+        default=True,
+        description="Escalate static fetch failures or shell pages to Playwright",
     )
 
 
@@ -430,6 +446,12 @@ class AppConfig(BaseSettings):
         env_api_key = os.environ.get("SMART_EXTRACTOR_API_KEY", "")
         env_base_url = os.environ.get("SMART_EXTRACTOR_BASE_URL", "")
         env_model = os.environ.get("SMART_EXTRACTOR_MODEL", "")
+        env_llm_cost_input = os.environ.get(
+            "SMART_EXTRACTOR_LLM_COST_INPUT_PER_MILLION", ""
+        )
+        env_llm_cost_output = os.environ.get(
+            "SMART_EXTRACTOR_LLM_COST_OUTPUT_PER_MILLION", ""
+        )
 
         env_fetcher_verify_ssl = os.environ.get(
             "SMART_EXTRACTOR_FETCHER_VERIFY_SSL", ""
@@ -458,6 +480,9 @@ class AppConfig(BaseSettings):
         )
         env_fetcher_challenge_fallback_to_static = os.environ.get(
             "SMART_EXTRACTOR_FETCHER_CHALLENGE_FALLBACK_TO_STATIC", ""
+        )
+        env_fetcher_static_fallback_to_dynamic = os.environ.get(
+            "SMART_EXTRACTOR_FETCHER_STATIC_FALLBACK_TO_DYNAMIC", ""
         )
         env_storage_sqlite_busy_timeout_ms = os.environ.get(
             "SMART_EXTRACTOR_STORAGE_SQLITE_BUSY_TIMEOUT_MS", ""
@@ -590,6 +615,16 @@ class AppConfig(BaseSettings):
             llm_data["base_url"] = env_base_url
         if env_model:
             llm_data["model"] = env_model
+        if env_llm_cost_input:
+            try:
+                llm_data["cost_input_per_million"] = float(env_llm_cost_input)
+            except ValueError:
+                pass
+        if env_llm_cost_output:
+            try:
+                llm_data["cost_output_per_million"] = float(env_llm_cost_output)
+            except ValueError:
+                pass
         config_secret_key = (
             env_security_config_secret_key
             or str(
@@ -646,6 +681,10 @@ class AppConfig(BaseSettings):
         if env_fetcher_challenge_fallback_to_static:
             fetcher_data["challenge_fallback_to_static"] = _parse_bool(
                 env_fetcher_challenge_fallback_to_static
+            )
+        if env_fetcher_static_fallback_to_dynamic:
+            fetcher_data["static_fallback_to_dynamic"] = _parse_bool(
+                env_fetcher_static_fallback_to_dynamic
             )
 
         storage_data = merged_config.get("storage", {})

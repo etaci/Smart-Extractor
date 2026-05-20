@@ -196,3 +196,38 @@ def test_extract_dynamic_fallback_uses_rule_fields_when_llm_unavailable(monkeypa
     assert result.data["company"] == "OpenAI"
     assert "20k-30k/月" in result.data["salary_range"]
     assert "requirements" in result.data
+
+
+def test_rule_fallback_extracts_common_english_product_fields(monkeypatch):
+    extractor = LLMExtractor(
+        LLMConfig(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test-model",
+            timeout=5,
+            rule_precheck_enabled=True,
+        )
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_call_json_llm",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("should not call llm")),
+    )
+
+    result = extractor.extract_dynamic(
+        text=(
+            "Product Name: Smart Extractor Pro\n"
+            "Price: $29.99 per month\n"
+            "Availability: In stock\n"
+            "Plan: Pro\n"
+        ),
+        source_url="https://example.com/products/pro",
+        selected_fields=["name", "price", "availability", "plan", "billing_period"],
+    )
+
+    assert result.extraction_strategy == "rule_precheck"
+    assert result.data["name"] == "Smart Extractor Pro"
+    assert result.data["price"] == "$29.99"
+    assert result.data["availability"].lower() == "in stock"
+    assert result.data["plan"] == "Pro"
+    assert "month" in result.data["billing_period"].lower()

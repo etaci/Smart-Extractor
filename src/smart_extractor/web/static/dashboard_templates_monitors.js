@@ -26,6 +26,189 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
     return normalized;
   }
 
+  function pct(value) {
+    const numeric = Number(value || 0);
+    return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(1)}%` : "0%";
+  }
+
+  function severityQueueClass(severity) {
+    const normalized = String(severity || "").trim().toLowerCase();
+    if (normalized === "danger" || normalized === "critical" || normalized === "high") {
+      return "badge-failed";
+    }
+    if (normalized === "warning" || normalized === "medium") {
+      return "badge-running";
+    }
+    return "badge-pending";
+  }
+
+  function severityQueueLabel(severity) {
+    const normalized = String(severity || "").trim().toLowerCase();
+    if (normalized === "danger" || normalized === "critical" || normalized === "high") {
+      return "高优先级";
+    }
+    if (normalized === "warning" || normalized === "medium") {
+      return "需要跟进";
+    }
+    return "常规提醒";
+  }
+
+  function failureCategoryLabel(category) {
+    const normalized = String(category || "").trim().toLowerCase();
+    if (normalized === "403") return "403";
+    if (normalized === "captcha") return "验证码";
+    if (normalized === "timeout") return "超时";
+    if (normalized === "missing_fields") return "字段缺失";
+    if (normalized === "model_error") return "模型异常";
+    return normalized || "暂无失败";
+  }
+
+  function renderOperationalAlertQueue(alerts) {
+    const container = document.getElementById("operational-alert-board");
+    if (!container) return;
+    const items = (Array.isArray(alerts) ? alerts : []).slice().sort((left, right) => {
+      const rank = { danger: 0, critical: 0, high: 0, warning: 1, medium: 1, info: 2, low: 2 };
+      return (
+        (rank[String(left.severity || "").toLowerCase()] ?? 3) -
+        (rank[String(right.severity || "").toLowerCase()] ?? 3)
+      );
+    });
+    renderInsightList(
+      "operational-alert-board",
+      items,
+      "当前没有客户成功自动化提醒。",
+      (item) => `
+        <div class="insight-item insight-item-row operational-alert-item">
+          <div>
+            <span class="insight-title">${escHtml(item.title || "运营提醒")}</span>
+            <p>${escHtml(item.message || "暂无提醒详情")}</p>
+            <p class="panel-note">${escHtml(joinParts([
+              item.tenant_id ? `租户：${item.tenant_id}` : "",
+              item.template_id ? `模板：${item.template_id}` : "",
+              item.type ? `类型：${item.type}` : "",
+            ]))}</p>
+            <p class="panel-note">${escHtml(item.recommended_action || "按提醒类型检查对应运营动作。")}</p>
+          </div>
+          <div class="insight-side">
+            <span class="badge ${severityQueueClass(item.severity)}">${escHtml(
+              severityQueueLabel(item.severity)
+            )}</span>
+          </div>
+        </div>
+      `
+    );
+  }
+
+  function renderTemplateScoreBoard(scores) {
+    const items = Array.isArray(scores) ? scores : [];
+    const container = document.getElementById("template-score-board");
+    if (!container) return;
+    if (!items.length) {
+      container.innerHTML = '<div class="insight-item"><p>当前还没有模板评分数据。模板被任务使用并产生字段反馈后，这里会自动生成评分。</p></div>';
+      return;
+    }
+    container.innerHTML = `
+      <div class="template-score-table-wrap">
+        <table class="table template-score-table">
+          <thead>
+            <tr>
+              <th>模板</th>
+              <th>成功率</th>
+              <th>字段正确率</th>
+              <th>字段缺失率</th>
+              <th>最近失败原因</th>
+              <th>质量分</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items
+              .map((item) => {
+                const failure = item.recent_failure || {};
+                return `
+                  <tr>
+                    <td>
+                      <strong>${escHtml(item.name || item.template_id || "未命名模板")}</strong>
+                      <p class="panel-note">${escHtml(joinParts([
+                        item.template_id || "",
+                        `样本 ${Number(item.total_count || 0)}`,
+                        `字段反馈 ${Number(item.field_feedback_count || 0)}`,
+                      ]))}</p>
+                    </td>
+                    <td>${pct(item.success_rate)}</td>
+                    <td>${pct(item.field_correct_rate)}</td>
+                    <td>${pct(item.field_missing_rate)}</td>
+                    <td>${escHtml(
+                      failure.category
+                        ? joinParts([
+                            failureCategoryLabel(failure.category),
+                            failure.at || "",
+                          ])
+                        : "暂无失败"
+                    )}</td>
+                    <td><span class="badge ${Number(item.quality_score || 0) >= 0.8 ? "badge-success" : "badge-running"}">${pct(item.quality_score)}</span></td>
+                  </tr>
+                `;
+              })
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderCustomerSuccessBoard(payload) {
+    const container = document.getElementById("customer-success-board");
+    if (!container) return;
+    const data = payload || {};
+    const quotaWatch = Array.isArray(data.quota_watch) ? data.quota_watch : [];
+    const failureWatch = Array.isArray(data.failure_watch) ? data.failure_watch : [];
+    const topTemplates = Array.isArray(data.top_success_templates)
+      ? data.top_success_templates
+      : [];
+    container.innerHTML = `
+      <div class="insight-item emphasis">
+        <span class="insight-title">接近额度的租户</span>
+        ${
+          quotaWatch.length
+            ? quotaWatch
+                .slice(0, 5)
+                .map(
+                  (item) => `<p>${escHtml(item.tenant_id)}：${pct(item.max_usage_ratio)}，套餐 ${escHtml(item.plan_name || "-")}</p>`
+                )
+                .join("")
+            : "<p>暂无租户接近额度。</p>"
+        }
+      </div>
+      <div class="insight-item">
+        <span class="insight-title">失败率偏高的租户</span>
+        ${
+          failureWatch.length
+            ? failureWatch
+                .slice(0, 5)
+                .map(
+                  (item) => `<p>${escHtml(item.tenant_id)}：失败率 ${pct(item.failure_rate)}，失败 ${escHtml(item.failed_count || 0)}/${escHtml(item.total_count || 0)}</p>`
+                )
+                .join("")
+            : "<p>暂无失败率异常租户。</p>"
+        }
+      </div>
+      <div class="insight-item">
+        <span class="insight-title">带来最多成功任务的模板</span>
+        ${
+          topTemplates.length
+            ? topTemplates
+                .slice(0, 5)
+                .map(
+                  (item) => `<p>${escHtml(item.name || item.template_id)}：成功 ${escHtml(item.success_count || 0)} 次</p>`
+                )
+                .join("")
+            : "<p>暂无模板成功任务记录。</p>"
+        }
+      </div>
+    `;
+    renderOperationalAlertQueue(data.automation_alerts || []);
+  }
+
   function alertLevelLabel(level) {
     const normalized = String(level || "").trim().toLowerCase();
     if (normalized === "changed") return "检测到变化";
@@ -339,6 +522,9 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
 
   function renderNotificationBoard(notifications) {
     const items = Array.isArray(notifications) ? notifications : [];
+    renderOperationalAlertQueue(
+      (state.latestCustomerSuccess && state.latestCustomerSuccess.automation_alerts) || []
+    );
     setText("notification-total", items.length);
     setText("notification-retry-pending", items.filter((item) => item.status === "retry_pending").length);
     setText("notification-failed", items.filter((item) => item.status === "failed").length);
@@ -550,6 +736,17 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
     if (showFeedback) showToast("模板市场已刷新", "success");
   }
 
+  async function loadTemplateScores(showFeedback = false) {
+    const data = await fetchJsonOrNull("/api/template_scores?limit=100");
+    if (!data) {
+      if (showFeedback) showToast("读取模板评分失败", "error");
+      return;
+    }
+    state.latestTemplateScores = Array.isArray(data.templates) ? data.templates : [];
+    renderTemplateScoreBoard(state.latestTemplateScores);
+    if (showFeedback) showToast("模板评分表已刷新", "success");
+  }
+
   async function loadMonitors(showFeedback = false) {
     const data = await fetchJsonOrNull("/api/monitors");
     if (!data) {
@@ -695,13 +892,17 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
     formatExtractionStrategy,
     renderTemplateBoard,
     renderMarketTemplateBoard,
+    renderTemplateScoreBoard,
+    renderOperationalAlertQueue,
     renderMonitorAlerts,
     renderMonitorBoard,
     renderNotificationBoard,
+    renderCustomerSuccessBoard,
     renderActorMarketBoard,
     renderInstalledActorBoard,
     loadTemplates,
     loadMarketTemplates,
+    loadTemplateScores,
     loadActorAssets,
     loadMonitors,
     loadNotifications,

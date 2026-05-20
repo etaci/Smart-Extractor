@@ -7,6 +7,7 @@ const {
   setSessionToken,
   getAuthHeaders,
   showToast,
+  initFailureDiagnosisDialog,
   initTheme,
   downloadTextFile,
 } = window.SmartExtractorShared;
@@ -72,12 +73,14 @@ let latestMonitors = [];
 let latestLearnedProfiles = [];
 let latestNlTaskPlan = null;
 let latestMarketTemplates = [];
+let latestTemplateScores = [];
 let activeTemplateMarketFilter = "all";
 let activeLearnedProfileFilter = "all";
 let learnedProfileSearchKeyword = "";
 let activeLearnedProfileDetailId = "";
 let activeLearnedProfileDetail = null;
 let latestNotifications = [];
+let latestCustomerSuccess = {};
 let activeNotificationFilter = "all";
 let dashboardAssetsModule = null;
 let dashboardAnalysis = null;
@@ -172,6 +175,12 @@ const learnedProfilesState = {
   set latestLearnedProfiles(value) {
     latestLearnedProfiles = Array.isArray(value) ? value : [];
   },
+  get latestCustomerSuccess() {
+    return latestCustomerSuccess;
+  },
+  set latestCustomerSuccess(value) {
+    latestCustomerSuccess = value || {};
+  },
   get activeLearnedProfileFilter() {
     return activeLearnedProfileFilter;
   },
@@ -222,6 +231,18 @@ const dashboardAssetsState = {
   },
   set latestMarketTemplates(value) {
     latestMarketTemplates = Array.isArray(value) ? value : [];
+  },
+  get latestTemplateScores() {
+    return latestTemplateScores;
+  },
+  set latestTemplateScores(value) {
+    latestTemplateScores = Array.isArray(value) ? value : [];
+  },
+  get latestCustomerSuccess() {
+    return latestCustomerSuccess;
+  },
+  set latestCustomerSuccess(value) {
+    latestCustomerSuccess = value || {};
   },
   get activeTemplateMarketFilter() {
     return activeTemplateMarketFilter;
@@ -286,11 +307,23 @@ const dashboardTaskRuntimeState = {
   set latestMarketTemplates(value) {
     latestMarketTemplates = Array.isArray(value) ? value : [];
   },
+  get latestTemplateScores() {
+    return latestTemplateScores;
+  },
+  set latestTemplateScores(value) {
+    latestTemplateScores = Array.isArray(value) ? value : [];
+  },
   get latestLearnedProfiles() {
     return latestLearnedProfiles;
   },
   set latestLearnedProfiles(value) {
     latestLearnedProfiles = Array.isArray(value) ? value : [];
+  },
+  get latestCustomerSuccess() {
+    return latestCustomerSuccess;
+  },
+  set latestCustomerSuccess(value) {
+    latestCustomerSuccess = value || {};
   },
   get activeTaskBatchFilter() {
     return activeTaskBatchFilter;
@@ -2540,6 +2573,9 @@ function bindEvents() {
   document.getElementById("actor-market-refresh-btn")?.addEventListener("click", () => {
     dashboardAssetsModule.loadActorAssets(true);
   });
+  document.getElementById("template-score-refresh-btn")?.addEventListener("click", () => {
+    dashboardAssetsModule.loadTemplateScores(true);
+  });
 }
 
 async function submitExtract(event) {
@@ -2565,11 +2601,13 @@ function startAuthenticatedDashboard() {
   dashboardStarted = true;
   refreshDashboard();
   dashboardAssetsModule.loadActorAssets();
+  dashboardAssetsModule.loadTemplateScores();
   scheduleDashboardRefresh();
 }
 
 function initDashboard() {
   initTheme();
+  initFailureDiagnosisDialog();
   initApiTokenInput();
   bindEvents();
   setBatchGroupInputVisibility();
@@ -2622,6 +2660,7 @@ function initDashboard() {
   updateBatchSummary();
   dashboardAssetsModule.renderTemplateBoard([]);
   dashboardAssetsModule.renderMarketTemplateBoard([]);
+  dashboardAssetsModule.renderTemplateScoreBoard([]);
   dashboardAssetsModule.renderActorMarketBoard([]);
   dashboardAssetsModule.renderInstalledActorBoard([]);
   dashboardAssetsModule.renderMonitorBoard([]);

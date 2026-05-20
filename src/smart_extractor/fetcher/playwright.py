@@ -475,6 +475,7 @@ class PlaywrightFetcher(BaseFetcher):
                 "proxy_url": attempt.proxy_url or None,
                 "proxy_urls": [],
                 "fetch_max_attempts": 1,
+                "static_fallback_to_dynamic": False,
             }
         )
         fetcher = StaticFetcher(static_config)

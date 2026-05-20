@@ -309,6 +309,25 @@ window.SmartExtractorTaskDetailRender = (() => {
     if (badge) {
       badge.className = `badge badge-${statusClass}`;
       badge.textContent = detail.status || "-";
+      const diagnosis = detail.failure_diagnosis || {};
+      if (detail.status === "failed" && diagnosis.actionable) {
+        badge.classList.add("task-status-button");
+        badge.setAttribute("role", "button");
+        badge.setAttribute("tabindex", "0");
+        badge.onclick = () => window.SmartExtractorShared.showFailureDiagnosis(diagnosis);
+        badge.onkeydown = (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            window.SmartExtractorShared.showFailureDiagnosis(diagnosis);
+          }
+        };
+      } else {
+        badge.classList.remove("task-status-button");
+        badge.removeAttribute("role");
+        badge.removeAttribute("tabindex");
+        badge.onclick = null;
+        badge.onkeydown = null;
+      }
     }
     if (progressBar) {
       progressBar.className = `task-progress-bar task-progress-bar-${statusClass}`;

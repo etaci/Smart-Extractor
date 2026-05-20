@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -108,6 +109,22 @@ def register_annotation_routes(
             created_by=_actor_name(request),
             tenant_id=tenant_id,
         )
+        field_quality_records = task_store.record_field_quality_feedback(
+            task=task,
+            annotation_id=annotation.annotation_id,
+            field_feedback=dict(payload.field_feedback or {}),
+            corrected_data=corrected_data,
+            template_id=template_id,
+            profile_id=profile_id,
+            notes=payload.notes.strip(),
+            created_by=_actor_name(request),
+            tenant_id=tenant_id,
+        )
+        field_quality_memory = task_store.build_field_quality_memory(
+            tenant_id=tenant_id,
+            template_id=template_id,
+            site_domain=urlparse(str(task.url or "")).netloc.strip().lower(),
+        )
 
         updated_template = None
         updated_profile = None
@@ -123,6 +140,7 @@ def register_annotation_routes(
                         "last_manual_annotation_task_id": task_id,
                         "last_manual_annotation_by": _actor_name(request),
                         "last_manual_annotation_notes": payload.notes.strip(),
+                        "field_quality_memory": field_quality_memory,
                     }
                 )
                 updated_template = task_store.create_or_update_template(
@@ -170,6 +188,7 @@ def register_annotation_routes(
                 "source_task_id": task_id,
                 "corrected_field_count": len(selected_fields),
                 "apply_auto_repair": payload.apply_auto_repair,
+                "field_quality_memory": field_quality_memory,
             },
             reason=repair_reason,
             tenant_id=tenant_id,
@@ -185,6 +204,8 @@ def register_annotation_routes(
             "message": repair_reason,
             "annotation": serialize_task_annotation(annotation),
             "repair": serialize_repair_suggestion(repair),
+            "field_quality_records": field_quality_records,
+            "field_quality_memory": field_quality_memory,
         }
         if updated_template is not None:
             response_payload["template"] = serialize_template(updated_template)

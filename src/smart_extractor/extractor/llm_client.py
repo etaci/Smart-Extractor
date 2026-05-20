@@ -301,11 +301,23 @@ class LLMClient:
             "gpt-4.1-mini": (0.40, 1.60),
             "gpt-4o": (5.00, 15.00),
             "gpt-4.1": (2.00, 8.00),
+            "claude-3-5-haiku": (0.80, 4.00),
+            "claude-3-5-sonnet": (3.00, 15.00),
+            "claude-3-7-sonnet": (3.00, 15.00),
+            "claude-sonnet-4": (3.00, 15.00),
+            "claude-4-sonnet": (3.00, 15.00),
         }
         for prefix, pricing in pricing_table.items():
             if normalized.startswith(prefix):
                 return pricing
         return 0.0, 0.0
+
+    def _resolve_pricing(self) -> tuple[float, float]:
+        override_input = float(getattr(self._config, "cost_input_per_million", 0.0) or 0.0)
+        override_output = float(getattr(self._config, "cost_output_per_million", 0.0) or 0.0)
+        if override_input > 0 or override_output > 0:
+            return override_input, override_output
+        return self._pricing_for_model(self._config.model)
 
     def _record_call(
         self,
@@ -314,9 +326,7 @@ class LLMClient:
         usage: UsageSample,
     ) -> None:
         elapsed_ms = elapsed_seconds * 1000
-        input_price_per_million, output_price_per_million = self._pricing_for_model(
-            self._config.model
-        )
+        input_price_per_million, output_price_per_million = self._resolve_pricing()
         estimated_cost = (
             usage.prompt_tokens * input_price_per_million
             + usage.completion_tokens * output_price_per_million

@@ -285,4 +285,6 @@ def test_ops_alerts_and_db_backup_restore(monkeypatch, tmp_path):
     restored_task = routes_module._task_store.get(task.task_id)
     assert restored_task is not None
     assert restored_task.status == "success"
-    assert restored_task.data == {"data": {"title": "backup"}}
+    assert restored_task.data["data"] == {"title": "backup"}
+    assert isinstance(restored_task.data["_llm_usage"], dict)
+    assert isinstance(restored_task.data["_runtime_metrics"], dict)

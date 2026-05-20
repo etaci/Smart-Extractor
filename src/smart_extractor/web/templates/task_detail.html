@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>网页智能提取系统 - 任务详情</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260422-airtable-1">
+  <link rel="stylesheet" href="/static/style.css?v=20260520-ops-diagnosis-1">
 </head>
 
 <body data-page="task-detail" data-task-id="{{ task.task_id }}">
@@ -279,9 +279,24 @@
     </main>
   </div>
 
-  <script src="/static/ui_shared.js?v=20260417-1"></script>
-  <script src="/static/task_detail_render.js?v=20260417-1"></script>
-  <script src="/static/task_detail.js?v=20260417-1"></script>
+  <div id="failure-diagnosis-dialog" class="diagnosis-dialog" hidden>
+    <div class="diagnosis-dialog-backdrop" data-close-failure-diagnosis></div>
+    <section class="diagnosis-dialog-panel" role="dialog" aria-modal="true" aria-labelledby="failure-diagnosis-title">
+      <div class="diagnosis-dialog-header">
+        <div>
+          <span id="failure-diagnosis-category" class="badge badge-running">失败诊断</span>
+          <h3 id="failure-diagnosis-title">诊断建议</h3>
+        </div>
+        <button class="btn btn-ghost btn-inline" type="button" data-close-failure-diagnosis>关闭</button>
+      </div>
+      <p id="failure-diagnosis-message" class="plain-note"></p>
+      <div id="failure-diagnosis-actions" class="insight-list compact-list"></div>
+    </section>
+  </div>
+
+  <script src="/static/ui_shared.js?v=20260520-ops-diagnosis-1"></script>
+  <script src="/static/task_detail_render.js?v=20260520-ops-diagnosis-1"></script>
+  <script src="/static/task_detail.js?v=20260520-ops-diagnosis-1"></script>
 </body>
 
 </html>

@@ -298,3 +298,16 @@ class TaskAnnotationRequest(BaseModel):
     field_feedback: dict[str, object] = Field(default_factory=dict, description="Field-level feedback")
     notes: str = Field(default="", description="Annotation notes")
     apply_auto_repair: bool = Field(default=False, description="Whether to apply repair immediately")
+
+
+class QuotaPlanRequest(BaseModel):
+    tenant_id: str = Field(default="", description="Tenant id, defaults to current tenant")
+    plan_name: str = Field(default="trial", description="Plan name")
+    monthly_task_limit: int = Field(default=1000, ge=0, description="Monthly task limit")
+    monthly_url_limit: int = Field(default=3000, ge=0, description="Monthly submitted URL limit")
+    monitor_limit: int = Field(default=50, ge=0, description="Total monitor limit")
+    monthly_token_limit: int = Field(default=1000000, ge=0, description="Monthly token limit")
+    export_limit: int = Field(default=200, ge=0, description="Monthly export limit")
+    max_concurrency: int = Field(default=3, ge=0, le=999, description="Max allowed concurrency")
+    overage_policy: str = Field(default="reject", description="Overage policy: reject or allow")
+    notes: str = Field(default="", description="Operator notes")

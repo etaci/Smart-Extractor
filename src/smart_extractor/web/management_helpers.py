@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+from smart_extractor.web.failure_diagnosis import build_task_failure_diagnosis
 from smart_extractor.web.monitor_schedule import (
     current_timestamp,
     normalize_schedule_interval_minutes,
@@ -860,12 +861,15 @@ def serialize_template(template: Any) -> dict[str, object]:
 
 def serialize_task_list_item(task: Any) -> dict[str, object]:
     payload = task.to_dict()
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
     return {
         "task_id": payload.get("task_id", ""),
         "url": payload.get("url", ""),
         "schema_name": payload.get("schema_name", "auto"),
         "storage_format": payload.get("storage_format", "json"),
         "status": payload.get("status", "pending"),
+        "error": payload.get("error", ""),
+        "failure_diagnosis": build_task_failure_diagnosis(payload, data),
         "created_at": payload.get("created_at", ""),
         "elapsed_ms": payload.get("elapsed_ms", 0.0),
         "quality_score": payload.get("quality_score", 0.0),

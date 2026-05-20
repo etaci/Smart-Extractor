@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>网页智能提取分析系统</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260515-auth-register-1">
+  <link rel="stylesheet" href="/static/style.css?v=20260520-ops-diagnosis-1">
 </head>
 <body data-page="dashboard" class="auth-login">
   <section id="login-screen" class="login-screen" aria-labelledby="login-title">
@@ -407,7 +407,32 @@
                 <span class="metric-label">等待执行</span>
                 <strong class="metric-value" id="stat-pending">{{ stats.pending }}</strong>
               </div>
+              <div class="metric-card">
+                <span class="metric-label">今日任务数</span>
+                <strong class="metric-value" id="ops-today-tasks">0</strong>
+              </div>
+              <div class="metric-card success">
+                <span class="metric-label">今日成功率</span>
+                <strong class="metric-value" id="ops-today-success-rate">0%</strong>
+              </div>
+              <div class="metric-card">
+                <span class="metric-label">Token 成本</span>
+                <strong class="metric-value metric-value-sm" id="ops-token-cost">$0.0000</strong>
+              </div>
+              <div class="metric-card warning">
+                <span class="metric-label">额度使用率</span>
+                <strong class="metric-value metric-value-sm" id="ops-quota-rate">0%</strong>
+              </div>
+              <div class="metric-card">
+                <span class="metric-label">活跃监控</span>
+                <strong class="metric-value" id="ops-active-monitors">0</strong>
+              </div>
+              <div class="metric-card">
+                <span class="metric-label">导出次数</span>
+                <strong class="metric-value" id="ops-export-count">0</strong>
+              </div>
             </div>
+            <div id="ops-failure-breakdown" class="insight-list compact-list"></div>
           </article>
 
           <article class="panel progress-panel">
@@ -1094,6 +1119,25 @@
           </div>
         </article>
 
+        <article class="panel template-score-panel">
+          <div class="section-heading">
+            <span>模板评分表</span>
+            <small>调用 /api/template_scores，按成功率、字段质量和最近失败原因评估模板健康度</small>
+          </div>
+          <div class="tasks-toolbar">
+            <button id="template-score-refresh-btn" class="btn btn-soft btn-inline" type="button">刷新模板评分</button>
+          </div>
+          <div id="template-score-board" class="insight-list compact-list"></div>
+        </article>
+
+        <article class="panel customer-success-panel">
+          <div class="section-heading">
+            <span>客户成功看板</span>
+            <small>跟踪接近额度、失败率偏高和带来最多成功任务的模板</small>
+          </div>
+          <div id="customer-success-board" class="governance-grid"></div>
+        </article>
+
         <article class="panel actor-market-panel">
           <div class="section-heading">
             <span>Actor 市场</span>
@@ -1200,6 +1244,13 @@
               <strong id="notification-sent" class="metric-value metric-value-sm">0</strong>
             </div>
           </div>
+          <section class="selection-panel notification-alert-panel">
+            <div class="section-heading compact">
+              <span>运营提醒队列</span>
+              <small>来自 customer_success.automation_alerts，并按 severity 排序</small>
+            </div>
+            <div id="operational-alert-board" class="insight-list compact-list"></div>
+          </section>
           <div id="notification-board" class="insight-list compact-list"></div>
         </article>
 
@@ -1285,15 +1336,30 @@
     </section>
   </div>
 
+  <div id="failure-diagnosis-dialog" class="diagnosis-dialog" hidden>
+    <div class="diagnosis-dialog-backdrop" data-close-failure-diagnosis></div>
+    <section class="diagnosis-dialog-panel" role="dialog" aria-modal="true" aria-labelledby="failure-diagnosis-title">
+      <div class="diagnosis-dialog-header">
+        <div>
+          <span id="failure-diagnosis-category" class="badge badge-running">失败诊断</span>
+          <h3 id="failure-diagnosis-title">诊断建议</h3>
+        </div>
+        <button class="btn btn-ghost btn-inline" type="button" data-close-failure-diagnosis>关闭</button>
+      </div>
+      <p id="failure-diagnosis-message" class="plain-note"></p>
+      <div id="failure-diagnosis-actions" class="insight-list compact-list"></div>
+    </section>
+  </div>
+
   <script id="initial-stats" type="application/json">{{ stats|tojson }}</script>
   <script id="initial-tasks" type="application/json">{{ tasks|tojson }}</script>
   <script id="initial-insights" type="application/json">{{ insights|tojson }}</script>
   <script id="runtime-status" type="application/json">{{ runtime_status|tojson }}</script>
-  <script src="/static/ui_shared.js?v=20260515-auth-register-1"></script>
+  <script src="/static/ui_shared.js?v=20260520-ops-diagnosis-1"></script>
   <script src="/static/dashboard_analysis.js?v=20260417-1"></script>
-  <script src="/static/dashboard_templates_monitors.js?v=20260515-auth-register-1"></script>
+  <script src="/static/dashboard_templates_monitors.js?v=20260520-ops-diagnosis-1"></script>
   <script src="/static/dashboard_learned_profiles.js?v=20260423-1"></script>
-  <script src="/static/dashboard_task_runtime.js?v=20260418-2"></script>
-  <script src="/static/app.js?v=20260515-auth-register-1"></script>
+  <script src="/static/dashboard_task_runtime.js?v=20260520-ops-diagnosis-1"></script>
+  <script src="/static/app.js?v=20260520-ops-diagnosis-1"></script>
 </body>
 </html>

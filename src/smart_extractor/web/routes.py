@@ -7,7 +7,7 @@ from __future__ import annotations
 import threading
 from inspect import Parameter, signature
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -28,6 +28,7 @@ from smart_extractor.web.api_models import (
     BatchExtractRequest,
     ExtractRequest,
     LoginRequest,
+    QuotaPlanRequest,
     RegisterRequest,
     TaskReviewRequest,
 )
@@ -737,6 +738,165 @@ async def api_cost_dashboard(
         recent_limit=max(20, min(int(recent_limit or 200), 500)),
     )
     return payload
+
+
+@router.get("/api/usage")
+async def api_usage_dashboard(
+    request: Request,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("dashboard:read")
+    return _task_store.build_usage_summary(identity.tenant_id)
+
+
+@router.get("/api/operational_overview")
+async def api_operational_overview(
+    request: Request,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("dashboard:read")
+    return _task_store.build_operational_overview(identity.tenant_id)
+
+
+@router.get("/api/customer_success")
+async def api_customer_success(
+    request: Request,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("dashboard:read")
+    return _task_store.build_customer_success_dashboard(identity.tenant_id)
+
+
+@router.get("/api/template_scores")
+async def api_template_scores(
+    request: Request,
+    limit: int = 100,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("dashboard:read")
+    return _task_store.build_template_scores(
+        identity.tenant_id,
+        limit=max(1, min(int(limit or 100), 500)),
+    )
+
+
+@router.get("/api/quota")
+async def api_quota_plan(
+    request: Request,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("dashboard:read")
+    return {
+        "plan": _task_store.get_quota_plan(identity.tenant_id),
+        "usage": _task_store.build_usage_summary(identity.tenant_id),
+    }
+
+
+@router.post("/api/quota")
+async def api_upsert_quota_plan(
+    payload: QuotaPlanRequest,
+    request: Request,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("config:manage")
+    target_tenant_id = str(payload.tenant_id or identity.tenant_id).strip() or identity.tenant_id
+    plan = _task_store.upsert_quota_plan(
+        tenant_id=target_tenant_id,
+        plan_name=payload.plan_name,
+        monthly_task_limit=payload.monthly_task_limit,
+        monthly_url_limit=payload.monthly_url_limit,
+        monitor_limit=payload.monitor_limit,
+        monthly_token_limit=payload.monthly_token_limit,
+        export_limit=payload.export_limit,
+        max_concurrency=payload.max_concurrency,
+        overage_policy=payload.overage_policy,
+        notes=payload.notes,
+    )
+    _audit(
+        request,
+        action="quota.upsert",
+        resource_type="tenant_quota",
+        resource_id=target_tenant_id,
+        payload={
+            "plan_name": plan["plan_name"],
+            "monthly_task_limit": plan["monthly_task_limit"],
+            "monthly_url_limit": plan["monthly_url_limit"],
+            "monitor_limit": plan["monitor_limit"],
+            "monthly_token_limit": plan["monthly_token_limit"],
+            "export_limit": plan["export_limit"],
+            "max_concurrency": plan["max_concurrency"],
+            "overage_policy": plan["overage_policy"],
+        },
+    )
+    return {"plan": plan, "usage": _task_store.build_usage_summary(target_tenant_id)}
+
+
+@router.get("/api/operational_metrics")
+async def api_operational_metrics(
+    request: Request,
+    limit: int = 100,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("dashboard:read")
+    return {
+        "metrics": _task_store.list_task_operational_metrics(
+            tenant_id=identity.tenant_id,
+            limit=max(1, min(int(limit or 100), 500)),
+        )
+    }
+
+
+@router.get("/api/readiness")
+async def api_readiness(
+    request: Request,
+    identity: UserIdentity = Depends(_api_guard),
+):
+    identity.require("dashboard:read")
+    runtime_status = collect_runtime_status(_app_config, app=request.app)
+    request.app.state.runtime_status = runtime_status
+    usage = _task_store.build_usage_summary(identity.tenant_id)
+    readiness_checks: dict[str, Any] = {
+        "database": {
+            "dialect": _task_store.database_dialect,
+            "production_ready": _task_store.database_dialect == "postgres",
+        },
+        "queue": {
+            "dispatch_mode": _app_config.web.task_dispatch_mode,
+            "redis_configured": bool(str(_app_config.web.redis_url or "").strip()),
+        },
+        "workers": {
+            "registered_count": len(
+                _task_store.list_worker_nodes(limit=100, tenant_id=identity.tenant_id)
+            ),
+            "builtin_worker_enabled": bool(_app_config.web.start_builtin_worker),
+        },
+        "proxy_pool": {
+            "endpoint_count": len(
+                _task_store.list_proxy_endpoints(limit=200, tenant_id=identity.tenant_id)
+            ),
+            "site_policy_count": len(
+                _task_store.list_site_policies(limit=200, tenant_id=identity.tenant_id)
+            ),
+        },
+        "quota": {
+            "plan_name": usage["plan"]["plan_name"],
+            "usage_ratio": usage["usage_ratio"],
+        },
+    }
+    warnings = list(runtime_status.get("warnings", []))
+    if not readiness_checks["database"]["production_ready"]:
+        warnings.append("生产环境建议使用 PostgreSQL，而不是本地 SQLite")
+    if not readiness_checks["queue"]["redis_configured"]:
+        warnings.append("生产环境建议配置 Redis 队列以支持多节点 worker")
+    return {
+        "status": "ready" if runtime_status.get("ready") else "not_ready",
+        "version": __version__,
+        "runtime_status": runtime_status,
+        "checks": readiness_checks,
+        "usage": usage,
+        "issues": runtime_status.get("issues", []),
+        "warnings": warnings,
+    }
 
 
 @router.get("/api/audit")

@@ -4,6 +4,7 @@ const {
   getApiToken,
   setApiToken,
   showToast,
+  initFailureDiagnosisDialog,
   initTheme,
   downloadTextFile,
   downloadBinaryFile,
@@ -182,6 +183,7 @@ function initTaskDetail() {
   }
 
   initTheme();
+  initFailureDiagnosisDialog();
   initTaskTokenInput();
   initCopyAction();
   initDownloadActions();

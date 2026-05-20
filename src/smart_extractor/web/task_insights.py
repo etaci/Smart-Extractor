@@ -9,6 +9,7 @@ from collections import defaultdict
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
+from smart_extractor.web.failure_diagnosis import build_task_failure_diagnosis
 from smart_extractor.web.management_helpers import (
     enrich_monitor_payload,
     notification_channels_from_profile,
@@ -266,6 +267,7 @@ def build_task_detail_payload(
         "completed_items": task.completed_items,
         "data": task.data,
         "error": task.error,
+        "failure_diagnosis": build_task_failure_diagnosis(task.to_dict(), task.data),
         "domain": extract_domain(task.url),
         "progress": build_progress_payload(task),
         "history_summary": history_summary,

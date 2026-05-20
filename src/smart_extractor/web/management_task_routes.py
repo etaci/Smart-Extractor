@@ -655,6 +655,12 @@ def register_task_routes(
         if not detail:
             raise HTTPException(status_code=404, detail="任务不存在")
 
+        task_store.enforce_quota(
+            tenant_id=_tenant_id(request),
+            event_type="export",
+            amount=1,
+        )
+
         normalized_format = str(format or "docx").strip().lower()
         if normalized_format == "docx":
             content = build_task_docx(detail)
@@ -677,6 +683,10 @@ def register_task_routes(
         else:
             raise HTTPException(status_code=400, detail="仅支持 docx、xlsx、md 或 json")
 
+        task_store.record_usage_event(
+            tenant_id=_tenant_id(request),
+            exports_count=1,
+        )
         request_logger(request, task_id).info("Export task: format={}", normalized_format)
         return Response(
             content=content,

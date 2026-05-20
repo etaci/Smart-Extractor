@@ -191,6 +191,8 @@ def test_dashboard_payload_includes_history_and_insights(monkeypatch, tmp_path):
     assert dashboard_response.status_code == 200
     dashboard_data = dashboard_response.json()
     assert dashboard_data["stats"]["total"] == 2
+    assert dashboard_data["operational_overview"]["today_tasks"] >= 2
+    assert "quota_usage_ratio" in dashboard_data["operational_overview"]
     assert dashboard_data["insights"]["summary"]["repeat_urls"] == 1
     assert dashboard_data["insights"]["summary"]["changed_tasks"] == 1
     assert dashboard_data["insights"]["recent_changes"][0]["task_id"] == last_task_id
@@ -266,6 +268,168 @@ def test_api_export_supports_markdown_and_json(monkeypatch, tmp_path):
     assert json_response.status_code == 200
     payload = json_response.json()
     assert payload["task_id"] == task.task_id
+
+    usage_response = client.get("/api/usage", headers={"X-API-Token": "test-token"})
+    assert usage_response.status_code == 200
+    assert usage_response.json()["totals"]["exports_count"] == 2
+
+
+def test_operational_usage_quota_and_readiness_routes(monkeypatch, tmp_path):
+    client, routes_module = _build_test_client(monkeypatch, tmp_path)
+    task = routes_module._task_store.create(
+        url="https://example.com/metrics",
+        schema_name="auto",
+        storage_format="json",
+    )
+    routes_module._task_store.mark_success(
+        task.task_id,
+        elapsed_ms=30.0,
+        quality_score=0.91,
+        data={
+            "data": {"title": "demo"},
+            "_llm_usage": {"total_tokens": 12, "estimated_cost_usd": 0.00012},
+            "_runtime_metrics": {"fetcher_type": "static"},
+        },
+    )
+
+    headers = {"X-API-Token": "test-token"}
+    metrics_response = client.get("/api/operational_metrics", headers=headers)
+    assert metrics_response.status_code == 200
+    metrics = metrics_response.json()["metrics"]
+    assert metrics[0]["task_id"] == task.task_id
+    assert metrics[0]["total_tokens"] == 12
+
+    quota_response = client.post(
+        "/api/quota",
+        headers=headers,
+        json={
+            "plan_name": "pilot",
+            "monthly_task_limit": 1,
+            "monthly_url_limit": 1,
+            "monitor_limit": 1,
+            "monthly_token_limit": 100,
+            "export_limit": 1,
+            "max_concurrency": 1,
+            "overage_policy": "reject",
+        },
+    )
+    assert quota_response.status_code == 200
+    assert quota_response.json()["plan"]["plan_name"] == "pilot"
+
+    blocked_response = client.post(
+        "/api/extract",
+        headers=headers,
+        json={"url": "https://example.com/blocked", "storage_format": "json"},
+    )
+    assert blocked_response.status_code == 402
+
+    readiness_response = client.get("/api/readiness", headers=headers)
+    assert readiness_response.status_code == 200
+    readiness = readiness_response.json()
+    assert readiness["checks"]["database"]["dialect"] == "sqlite"
+    assert readiness["usage"]["plan"]["plan_name"] == "pilot"
+
+
+def test_dashboard_includes_failure_diagnosis_and_customer_success(monkeypatch, tmp_path):
+    client, routes_module = _build_test_client(monkeypatch, tmp_path)
+    headers = {"X-API-Token": "test-token"}
+
+    template = routes_module._task_store.create_or_update_template(
+        name="价格监控模板",
+        url="https://shop.example.com/p/1",
+        page_type="product",
+        schema_name="auto",
+        storage_format="json",
+        use_static=True,
+        selected_fields=["title", "price"],
+        field_labels={"title": "标题", "price": "价格"},
+    )
+    success_task = routes_module._task_store.create(
+        url="https://shop.example.com/p/1",
+        schema_name="auto",
+        storage_format="json",
+    )
+    routes_module._task_store.mark_success(
+        success_task.task_id,
+        elapsed_ms=12.0,
+        quality_score=0.9,
+        data={
+            "data": {"title": "Phone", "price": "99"},
+            "_execution_context": {"template_id": template.template_id},
+        },
+    )
+    loaded_success_task = routes_module._task_store.get(success_task.task_id)
+    assert loaded_success_task is not None
+    routes_module._task_store.record_field_quality_feedback(
+        task=loaded_success_task,
+        annotation_id="ann-route-score",
+        field_feedback={"title": "correct", "price": "missing"},
+        template_id=template.template_id,
+        created_by="tester",
+    )
+    failed_task = routes_module._task_store.create(
+        url="https://blocked.example.com",
+        schema_name="auto",
+        storage_format="json",
+    )
+    routes_module._task_store.mark_failed(
+        failed_task.task_id,
+        elapsed_ms=30.0,
+        error="403 Forbidden",
+    )
+    model_failed_task = routes_module._task_store.create(
+        url="https://model.example.com",
+        schema_name="auto",
+        storage_format="json",
+    )
+    routes_module._task_store.mark_failed(
+        model_failed_task.task_id,
+        elapsed_ms=30.0,
+        error="LLM invalid json response",
+    )
+    routes_module._task_store.upsert_quota_plan(
+        tenant_id="tenant-near",
+        monthly_task_limit=10,
+        monthly_url_limit=10,
+        monitor_limit=10,
+        monthly_token_limit=100,
+        export_limit=10,
+    )
+    routes_module._task_store.record_usage_event(
+        tenant_id="tenant-near",
+        tasks_created=9,
+        urls_submitted=9,
+        total_tokens=90,
+    )
+
+    response = client.get("/api/dashboard", headers=headers)
+    assert response.status_code == 200
+    payload = response.json()
+    failed_rows = [
+        item for item in payload["tasks"] if item["task_id"] == failed_task.task_id
+    ]
+    assert failed_rows[0]["failure_diagnosis"]["category"] == "403"
+    model_failed_rows = [
+        item for item in payload["tasks"] if item["task_id"] == model_failed_task.task_id
+    ]
+    assert model_failed_rows[0]["failure_diagnosis"]["category"] == "model_error"
+    assert "template_scores" in payload
+    assert payload["template_scores"]["templates"][0]["template_id"] == template.template_id
+    assert payload["template_scores"]["templates"][0]["field_missing_rate"] == 0.5
+
+    customer_success = payload["customer_success"]
+    assert customer_success["quota_watch"][0]["tenant_id"] == "tenant-near"
+    assert customer_success["top_success_templates"][0]["template_id"] == template.template_id
+    assert any(
+        item["type"] == "near_quota"
+        for item in customer_success["automation_alerts"]
+    )
+
+    scores_response = client.get("/api/template_scores", headers=headers)
+    assert scores_response.status_code == 200
+    scores = scores_response.json()["templates"]
+    assert scores[0]["template_id"] == template.template_id
+    assert scores[0]["field_correct_rate"] == 0.5
 
 
 def test_api_batch_returns_and_persists_batch_group_id(monkeypatch, tmp_path):

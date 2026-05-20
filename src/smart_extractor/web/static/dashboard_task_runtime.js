@@ -24,6 +24,7 @@ window.SmartExtractorDashboardTaskRuntime = function createDashboardTaskRuntime(
     state,
   } = deps;
   let refreshInFlight = null;
+  const notifiedFailureDiagnoses = new Set();
 
   function parsePercent(value) {
     const numeric = Number.parseFloat(String(value).replace("%", ""));
@@ -96,6 +97,69 @@ window.SmartExtractorDashboardTaskRuntime = function createDashboardTaskRuntime(
     setText("hero-saved-runs", summary.site_memory_saved_runs || summary.rule_based_tasks || 0);
     setText("hero-active-monitors", summary.active_monitors || 0);
     setText("hero-high-priority-alerts", summary.high_priority_alerts || 0);
+  }
+
+  function formatPercentRatio(value) {
+    const numeric = Number(value || 0);
+    if (!Number.isFinite(numeric)) {
+      return "0%";
+    }
+    return `${(Math.max(numeric, 0) * 100).toFixed(1)}%`;
+  }
+
+  function encodedDiagnosis(diagnosis) {
+    try {
+      return encodeURIComponent(JSON.stringify(diagnosis || {}));
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function applyOperationalOverview(overview) {
+    const payload = overview || {};
+    setText("ops-today-tasks", payload.today_tasks || 0);
+    setText("ops-today-success-rate", payload.today_success_rate_label || "0%");
+    const tokenCost = payload.token_cost || {};
+    setText(
+      "ops-token-cost",
+      `$${Number(tokenCost.model_cost_usd || 0).toFixed(4)}`
+    );
+    const quotaRatios = payload.quota_usage_ratio || {};
+    const maxQuotaRatio = Math.max(
+      Number(quotaRatios.tasks || 0),
+      Number(quotaRatios.urls || 0),
+      Number(quotaRatios.monitors || 0),
+      Number(quotaRatios.tokens || 0),
+      Number(quotaRatios.exports || 0)
+    );
+    setText("ops-quota-rate", formatPercentRatio(maxQuotaRatio));
+    setText("ops-active-monitors", payload.active_monitors || 0);
+    setText("ops-export-count", payload.exports_count || 0);
+
+    const failureContainer = document.getElementById("ops-failure-breakdown");
+    if (!failureContainer) {
+      return;
+    }
+    const failures = Array.isArray(payload.failure_breakdown)
+      ? payload.failure_breakdown
+      : [];
+    failureContainer.innerHTML = failures.length
+      ? failures
+          .map(
+            (item) => `
+              <div class="insight-item">
+                <span class="insight-title">${escHtml(item.category || "unknown")}</span>
+                <p>今日失败 ${escHtml(item.count || 0)} 次</p>
+              </div>
+            `
+          )
+          .join("")
+      : `
+        <div class="insight-item emphasis">
+          <span class="insight-title">今日暂无失败分类</span>
+          <p>失败分类会在任务失败后自动沉淀到运营总览。</p>
+        </div>
+      `;
   }
 
   function updateInsights(tasks, stats, insights) {
@@ -196,6 +260,15 @@ window.SmartExtractorDashboardTaskRuntime = function createDashboardTaskRuntime(
           ? `batch (${Number(task.completed_items || 0)}/${Number(task.total_items || 0)})`
           : task.schema_name || "auto";
         const progressText = formatTaskProgress(task);
+        const diagnosis = task.failure_diagnosis || {};
+        const diagnosisHtml =
+          diagnosis.actionable && task.status === "failed"
+            ? `<span class="task-status-meta">${escHtml(diagnosis.title || "失败自诊断")}：${escHtml(diagnosis.suggestion || "")}</span>`
+            : "";
+        const statusBadge =
+          diagnosis.actionable && task.status === "failed"
+            ? `<button class="badge badge-${task.status} task-status-button" type="button" data-failure-diagnosis="${encodedDiagnosis(diagnosis)}">${escHtml(statusLabel(task.status))}</button>`
+            : `<span class="badge badge-${task.status}">${escHtml(statusLabel(task.status))}</span>`;
         return `
           <tr class="task-row-${task.status}">
             <td><code>${escHtml(task.task_id)}</code></td>
@@ -203,8 +276,9 @@ window.SmartExtractorDashboardTaskRuntime = function createDashboardTaskRuntime(
             <td class="url-cell" title="${escHtml(urlLabel)}">${escHtml(urlShort)}</td>
             <td>${escHtml(modeLabel)}</td>
             <td class="task-status-cell">
-              <span class="badge badge-${task.status}">${escHtml(statusLabel(task.status))}</span>
+              ${statusBadge}
               ${progressText ? `<span class="task-status-meta">${escHtml(progressText)}</span>` : ""}
+              ${diagnosisHtml}
             </td>
             <td>${formatQuality(task.quality_score)}</td>
             <td>${elapsed}</td>
@@ -214,6 +288,33 @@ window.SmartExtractorDashboardTaskRuntime = function createDashboardTaskRuntime(
         `;
       })
       .join("");
+    tbody.querySelectorAll("[data-failure-diagnosis]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const raw = button.dataset.failureDiagnosis || "";
+        try {
+          window.SmartExtractorShared.showFailureDiagnosis(
+            JSON.parse(decodeURIComponent(raw))
+          );
+        } catch (_) {
+          showToast("诊断信息解析失败", "error");
+        }
+      });
+    });
+  }
+
+  function notifyFailureDiagnoses(tasks) {
+    (tasks || []).forEach((task) => {
+      if (task.status !== "failed") return;
+      const diagnosis = task.failure_diagnosis || {};
+      if (!diagnosis.actionable) return;
+      const key = `${task.task_id}:${diagnosis.category || "unknown"}`;
+      if (notifiedFailureDiagnoses.has(key)) return;
+      notifiedFailureDiagnoses.add(key);
+      showToast(
+        `${diagnosis.title || "任务失败"}：${diagnosis.suggestion || diagnosis.message || "请查看任务详情"}`,
+        diagnosis.severity === "danger" ? "error" : "warning"
+      );
+    });
   }
 
   function renderWatchlist(insights) {
@@ -332,14 +433,16 @@ window.SmartExtractorDashboardTaskRuntime = function createDashboardTaskRuntime(
     }
   }
 
-  function applyDashboardPayload(stats, tasks, insights) {
+  function applyDashboardPayload(stats, tasks, insights, operationalOverview) {
     const orderedTasks = sortTasksForDisplay(tasks || []);
     state.latestInsightsState = insights || state.latestInsightsState;
     syncTaskBatchFilterOptions(orderedTasks);
     syncContinueBatchOptions(orderedTasks);
     applyStats(stats || { total: 0, success: 0, failed: 0, running: 0, pending: 0, success_rate: "0%" });
     renderTasksTable(orderedTasks);
+    notifyFailureDiagnoses(orderedTasks);
     applyInsightSummary(insights || {});
+    applyOperationalOverview(operationalOverview || {});
     updateInsights(orderedTasks, stats || {}, insights || {});
     renderWatchlist(insights || {});
 
@@ -355,6 +458,10 @@ window.SmartExtractorDashboardTaskRuntime = function createDashboardTaskRuntime(
       );
       modules.dashboardAssetsModule.renderTemplateBoard(state.latestTemplates);
       modules.dashboardAssetsModule.renderMarketTemplateBoard(state.latestMarketTemplates);
+      modules.dashboardAssetsModule.renderTemplateScoreBoard(state.latestTemplateScores);
+      modules.dashboardAssetsModule.renderCustomerSuccessBoard(
+        state.latestCustomerSuccess || {}
+      );
     }
   }
 
@@ -415,12 +522,23 @@ window.SmartExtractorDashboardTaskRuntime = function createDashboardTaskRuntime(
         dashboardData.notifications || state.latestNotifications;
       state.latestMarketTemplates =
         dashboardData.market_templates || state.latestMarketTemplates;
+      state.latestTemplateScores =
+        (dashboardData.template_scores && dashboardData.template_scores.templates) ||
+        dashboardData.template_scores ||
+        state.latestTemplateScores;
       state.latestLearnedProfiles =
         dashboardData.learned_profiles || state.latestLearnedProfiles;
+      state.latestCustomerSuccess =
+        dashboardData.customer_success || state.latestCustomerSuccess || {};
       if (dashboardData.runtime_status) {
         applyRuntimeStatus(dashboardData.runtime_status);
       }
-      applyDashboardPayload(stats, tasks, insights);
+      applyDashboardPayload(
+        stats,
+        tasks,
+        insights,
+        dashboardData.operational_overview || {}
+      );
       return { ok: true, rateLimited: false };
     })();
 

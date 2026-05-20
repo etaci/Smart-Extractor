@@ -2,6 +2,9 @@
 Web 任务持久化存储测试。
 """
 
+import pytest
+from fastapi import HTTPException
+
 from smart_extractor.web.task_store import SQLiteTaskStore
 
 
@@ -36,7 +39,9 @@ def test_sqlite_task_store_create_and_persist(tmp_path):
     done = store.get(task.task_id)
     assert done is not None
     assert done.status == "success"
-    assert done.data == {"title": "T"}
+    assert done.data["title"] == "T"
+    assert isinstance(done.data["_llm_usage"], dict)
+    assert isinstance(done.data["_runtime_metrics"], dict)
     assert done.quality_score == 0.91
     assert done.progress_percent == 100.0
 
@@ -45,12 +50,85 @@ def test_sqlite_task_store_create_and_persist(tmp_path):
     reloaded = reloaded_store.get(task.task_id)
     assert reloaded is not None
     assert reloaded.status == "success"
-    assert reloaded.data == {"title": "T"}
+    assert reloaded.data["title"] == "T"
 
     stats = reloaded_store.stats()
     assert stats["total"] == 1
     assert stats["success"] == 1
     assert stats["failed"] == 0
+
+
+def test_task_store_records_operational_metrics_and_usage(tmp_path):
+    db_path = tmp_path / "web_tasks.db"
+    store = SQLiteTaskStore(db_path)
+
+    task = store.create(
+        url="https://example.com/ops",
+        schema_name="auto",
+        storage_format="json",
+    )
+    store.mark_success(
+        task.task_id,
+        elapsed_ms=123.0,
+        quality_score=0.92,
+        data={
+            "page_type": "product",
+            "data": {"title": "Phone", "price": "99", "stock": ""},
+            "_llm_usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 25,
+                "total_tokens": 125,
+                "estimated_cost_usd": 0.00125,
+            },
+            "_runtime_metrics": {
+                "fetcher_type": "playwright",
+                "fetch_elapsed_ms": 80.0,
+                "playwright_elapsed_ms": 70.0,
+                "retry_count": 1,
+            },
+            "_execution_context": {"proxy_pool_size": 3, "template_id": "tpl-demo"},
+        },
+    )
+
+    metrics = store.list_task_operational_metrics()
+    assert len(metrics) == 1
+    assert metrics[0]["task_id"] == task.task_id
+    assert metrics[0]["status"] == "success"
+    assert metrics[0]["field_count"] == 3
+    assert metrics[0]["filled_field_count"] == 2
+    assert metrics[0]["total_tokens"] == 125
+    assert metrics[0]["proxy_pool_size"] == 3
+
+    usage = store.build_usage_summary()
+    assert usage["totals"]["tasks_created"] == 1
+    assert usage["totals"]["urls_submitted"] == 1
+    assert usage["totals"]["total_tokens"] == 125
+    assert usage["totals"]["model_cost_usd"] == 0.00125
+    assert usage["totals"]["playwright_elapsed_ms"] == 70.0
+    assert usage["totals"]["retry_count"] == 1
+
+
+def test_task_store_rejects_quota_overage_before_batch_creation(tmp_path):
+    db_path = tmp_path / "web_tasks.db"
+    store = SQLiteTaskStore(db_path)
+    store.upsert_quota_plan(
+        tenant_id="default",
+        monthly_task_limit=2,
+        monthly_url_limit=2,
+        monitor_limit=10,
+        monthly_token_limit=1000,
+        export_limit=10,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        store.create_batch_root(
+            urls=["https://example.com/a", "https://example.com/b"],
+            schema_name="auto",
+            storage_format="json",
+        )
+
+    assert exc_info.value.status_code == 402
+    assert store.stats()["total"] == 0
 
 
 def test_sqlite_task_store_mark_failed(tmp_path):
@@ -67,6 +145,250 @@ def test_sqlite_task_store_mark_failed(tmp_path):
     assert failed.status == "failed"
     assert failed.error == "timeout"
     assert failed.progress_percent == 100.0
+    assert isinstance(failed.data.get("_llm_usage"), dict)
+    assert isinstance(failed.data.get("_runtime_metrics"), dict)
+    assert failed.data["_runtime_metrics"]["status"] == "failed"
+
+
+def test_task_store_records_field_quality_feedback_memory(tmp_path):
+    db_path = tmp_path / "web_tasks.db"
+    store = SQLiteTaskStore(db_path)
+    template = store.create_or_update_template(
+        name="商品监控",
+        url="https://shop.example.com/p/1",
+        page_type="product",
+        schema_name="auto",
+        storage_format="json",
+        use_static=True,
+        selected_fields=["title", "price", "stock"],
+        field_labels={"title": "标题", "price": "价格", "stock": "库存"},
+    )
+    task = store.create(
+        url="https://shop.example.com/p/1",
+        schema_name="auto",
+        storage_format="json",
+    )
+    store.mark_success(
+        task.task_id,
+        elapsed_ms=100.0,
+        quality_score=0.8,
+        data={"data": {"title": "Phone", "price": "99", "stock": ""}},
+    )
+    loaded_task = store.get(task.task_id)
+    assert loaded_task is not None
+
+    records = store.record_field_quality_feedback(
+        task=loaded_task,
+        annotation_id="ann-demo",
+        field_feedback={"title": "correct", "price": "incorrect", "stock": "missing"},
+        corrected_data={"price": "89"},
+        template_id=template.template_id,
+        profile_id="lp-demo",
+        created_by="tester",
+    )
+    memory = store.build_field_quality_memory(
+        template_id=template.template_id,
+        site_domain="shop.example.com",
+    )
+
+    assert len(records) == 3
+    assert memory["fields"]["title"]["correct"] == 1
+    assert memory["fields"]["price"]["incorrect"] == 1
+    assert memory["fields"]["stock"]["missing"] == 1
+
+
+def test_task_store_builds_template_scores_from_feedback_and_failures(tmp_path):
+    db_path = tmp_path / "web_tasks.db"
+    store = SQLiteTaskStore(db_path)
+    template = store.create_or_update_template(
+        name="商品价格监控",
+        url="https://shop.example.com/p/score",
+        page_type="product",
+        schema_name="auto",
+        storage_format="json",
+        use_static=True,
+        selected_fields=["title", "price", "stock"],
+        field_labels={"title": "标题", "price": "价格", "stock": "库存"},
+    )
+
+    success_task = store.create(
+        url="https://shop.example.com/p/score",
+        schema_name="auto",
+        storage_format="json",
+    )
+    store.mark_success(
+        success_task.task_id,
+        elapsed_ms=42.0,
+        quality_score=0.92,
+        data={
+            "data": {"title": "Phone", "price": "99", "stock": ""},
+            "_execution_context": {"template_id": template.template_id},
+        },
+    )
+    failed_task = store.create(
+        url="https://shop.example.com/p/score",
+        schema_name="auto",
+        storage_format="json",
+    )
+    store.mark_failed(
+        failed_task.task_id,
+        elapsed_ms=50.0,
+        error="timeout while waiting for selector",
+        data={"_execution_context": {"template_id": template.template_id}},
+    )
+
+    loaded_task = store.get(success_task.task_id)
+    assert loaded_task is not None
+    store.record_field_quality_feedback(
+        task=loaded_task,
+        annotation_id="ann-score",
+        field_feedback={"title": "correct", "price": "incorrect", "stock": "missing"},
+        corrected_data={"price": "89"},
+        template_id=template.template_id,
+        created_by="tester",
+    )
+
+    payload = store.build_template_scores(limit=5)
+    scored = payload["templates"][0]
+    assert scored["template_id"] == template.template_id
+    assert scored["success_rate"] == 0.5
+    assert scored["success_count"] == 1
+    assert scored["failed_count"] == 1
+    assert scored["field_correct_rate"] == 0.3333
+    assert scored["field_missing_rate"] == 0.3333
+    assert scored["field_feedback"] == {
+        "correct": 1,
+        "incorrect": 1,
+        "missing": 1,
+        "unknown": 0,
+    }
+    assert scored["recent_failure"]["category"] == "timeout"
+    assert 0 < scored["quality_score"] < 1
+
+
+def test_task_store_customer_success_automation_alerts(tmp_path):
+    db_path = tmp_path / "web_tasks.db"
+    store = SQLiteTaskStore(db_path)
+    store.upsert_quota_plan(
+        tenant_id="tenant-near",
+        monthly_task_limit=10,
+        monthly_url_limit=10,
+        monitor_limit=10,
+        monthly_token_limit=100,
+        export_limit=10,
+    )
+    store.record_usage_event(
+        tenant_id="tenant-near",
+        tasks_created=9,
+        urls_submitted=9,
+        total_tokens=90,
+    )
+
+    for index in range(3):
+        task = store.create(
+            url=f"https://fail.example.com/{index}",
+            schema_name="auto",
+            storage_format="json",
+            tenant_id="tenant-failing",
+        )
+        store.mark_failed(
+            task.task_id,
+            elapsed_ms=10.0,
+            error="403 Forbidden",
+            tenant_id="tenant-failing",
+        )
+
+    inactive_task = store.create(
+        url="https://inactive.example.com/old",
+        schema_name="auto",
+        storage_format="json",
+        tenant_id="tenant-inactive",
+    )
+    store.mark_success(
+        inactive_task.task_id,
+        elapsed_ms=10.0,
+        quality_score=0.8,
+        data={"data": {"title": "old"}},
+        tenant_id="tenant-inactive",
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE web_tasks SET created_at='2026-04-01T00:00:00' WHERE task_id=?",
+            (inactive_task.task_id,),
+        )
+        conn.commit()
+
+    template = store.create_or_update_template(
+        name="公告监控",
+        url="https://news.example.com/a",
+        page_type="notice",
+        schema_name="auto",
+        storage_format="json",
+        use_static=True,
+        selected_fields=["title"],
+        field_labels={"title": "标题"},
+        template_id="tpl-decline",
+        tenant_id="tenant-template",
+    )
+    for index in range(3):
+        task = store.create(
+            url=f"https://news.example.com/old-{index}",
+            schema_name="auto",
+            storage_format="json",
+            tenant_id="tenant-template",
+        )
+        store.mark_success(
+            task.task_id,
+            elapsed_ms=10.0,
+            quality_score=0.9,
+            data={"_execution_context": {"template_id": template.template_id}},
+            tenant_id="tenant-template",
+        )
+    for index in range(3):
+        task = store.create(
+            url=f"https://news.example.com/new-{index}",
+            schema_name="auto",
+            storage_format="json",
+            tenant_id="tenant-template",
+        )
+        store.mark_failed(
+            task.task_id,
+            elapsed_ms=10.0,
+            error="model invalid json",
+            data={"_execution_context": {"template_id": template.template_id}},
+            tenant_id="tenant-template",
+        )
+    with store._connect() as conn:
+        conn.execute(
+            """
+            UPDATE task_operational_metrics
+            SET updated_at='2026-05-08T00:00:00'
+            WHERE tenant_id='tenant-template' AND status='success'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE task_operational_metrics
+            SET updated_at='2026-05-18T00:00:00'
+            WHERE tenant_id='tenant-template' AND status='failed'
+            """
+        )
+        conn.commit()
+
+    dashboard = store.build_customer_success_dashboard()
+    alert_types = {item["type"] for item in dashboard["automation_alerts"]}
+
+    assert "near_quota" in alert_types
+    assert "high_failure_rate" in alert_types
+    assert "inactive_tenant" in alert_types
+    assert "template_success_rate_drop" in alert_types
+    decline_alert = next(
+        item
+        for item in dashboard["automation_alerts"]
+        if item["type"] == "template_success_rate_drop"
+    )
+    assert decline_alert["tenant_id"] == "tenant-template"
+    assert decline_alert["template_id"] == template.template_id
 
 
 def test_sqlite_task_store_builds_history_and_change_insights(tmp_path):

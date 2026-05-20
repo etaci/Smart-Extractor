@@ -43,6 +43,7 @@ def test_estimate_token_count_positive_for_non_empty():
 def test_pricing_for_model_known_vs_unknown():
     assert LLMClient._pricing_for_model("gpt-4o-mini") == (0.15, 0.60)
     assert LLMClient._pricing_for_model("gpt-4o") == (5.00, 15.00)
+    assert LLMClient._pricing_for_model("claude-sonnet-4") == (3.00, 15.00)
     assert LLMClient._pricing_for_model("totally-unknown") == (0.0, 0.0)
 
 
@@ -122,6 +123,26 @@ def test_record_call_estimated_cost_matches_pricing_table():
     stats = client.get_stats()
     # gpt-4o-mini 价格为 (0.15 input, 0.60 output) per 1M tokens
     assert abs(stats["estimated_cost_usd"] - (0.15 + 0.60)) < 1e-6
+
+
+def test_record_call_uses_configured_cost_override():
+    client = LLMClient(
+        LLMConfig(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="unknown-provider-model",
+            timeout=5,
+            cost_input_per_million=1.25,
+            cost_output_per_million=2.5,
+        )
+    )
+    client._record_call(
+        0.0,
+        usage=UsageSample(
+            prompt_tokens=1_000_000, completion_tokens=1_000_000, source="api"
+        ),
+    )
+    assert abs(client.get_stats()["estimated_cost_usd"] - 3.75) < 1e-6
 
 
 def test_stream_chat_collects_chunks_and_usage():

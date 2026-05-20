@@ -201,6 +201,21 @@ def create_management_router(
             window_hours=max(1, min(int(digest_window_hours), 168)),
             tenant_id=tenant_id,
         )
+        operational_overview = (
+            task_store.build_operational_overview(tenant_id=tenant_id)
+            if hasattr(task_store, "build_operational_overview")
+            else {}
+        )
+        customer_success = (
+            task_store.build_customer_success_dashboard(tenant_id=tenant_id)
+            if hasattr(task_store, "build_customer_success_dashboard")
+            else {}
+        )
+        template_scores = (
+            task_store.build_template_scores(tenant_id=tenant_id)
+            if hasattr(task_store, "build_template_scores")
+            else {"templates": []}
+        )
         funnel_events = task_store.list_funnel_events(limit=20, tenant_id=tenant_id)
         funnel_summary = task_store.build_funnel_summary(tenant_id=tenant_id)
         market_templates = list_market_templates()
@@ -266,6 +281,9 @@ def create_management_router(
                 for item in task_store.list_repair_suggestions(limit=20, tenant_id=tenant_id)
             ],
             "notification_digest": notification_digest,
+            "operational_overview": operational_overview,
+            "customer_success": customer_success,
+            "template_scores": template_scores,
             "funnel_summary": funnel_summary,
             "funnel_events": [serialize_funnel_event(item) for item in funnel_events],
             "market_templates": market_templates,

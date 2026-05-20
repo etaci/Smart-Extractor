@@ -705,6 +705,123 @@ def _create_funnel_tables(conn) -> None:
     )
 
 
+def _create_operational_tables(conn) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS task_operational_metrics (
+            id {_id_column_sql(getattr(conn, "dialect", "sqlite"))},
+            tenant_id TEXT NOT NULL DEFAULT 'default',
+            task_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT '',
+            schema_name TEXT NOT NULL DEFAULT '',
+            page_type TEXT NOT NULL DEFAULT '',
+            monitor_id TEXT NOT NULL DEFAULT '',
+            template_id TEXT NOT NULL DEFAULT '',
+            failure_category TEXT NOT NULL DEFAULT '',
+            quality_score REAL NOT NULL DEFAULT 0,
+            field_count INTEGER NOT NULL DEFAULT 0,
+            filled_field_count INTEGER NOT NULL DEFAULT 0,
+            empty_field_count INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            fetcher_type TEXT NOT NULL DEFAULT '',
+            fetch_elapsed_ms REAL NOT NULL DEFAULT 0,
+            playwright_elapsed_ms REAL NOT NULL DEFAULT 0,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            proxy_pool_size INTEGER NOT NULL DEFAULT 0,
+            elapsed_ms REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_operational_metrics_tenant_task ON task_operational_metrics(tenant_id, task_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_operational_metrics_tenant_status ON task_operational_metrics(tenant_id, status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_operational_metrics_updated_at ON task_operational_metrics(updated_at)"
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS tenant_usage_daily (
+            id {_id_column_sql(getattr(conn, "dialect", "sqlite"))},
+            tenant_id TEXT NOT NULL DEFAULT 'default',
+            usage_date TEXT NOT NULL,
+            tasks_created INTEGER NOT NULL DEFAULT 0,
+            urls_submitted INTEGER NOT NULL DEFAULT 0,
+            monitors_created INTEGER NOT NULL DEFAULT 0,
+            exports_count INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            model_cost_usd REAL NOT NULL DEFAULT 0,
+            playwright_elapsed_ms REAL NOT NULL DEFAULT 0,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_usage_daily_tenant_date ON tenant_usage_daily(tenant_id, usage_date)"
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS tenant_quota_plans (
+            id {_id_column_sql(getattr(conn, "dialect", "sqlite"))},
+            tenant_id TEXT NOT NULL UNIQUE,
+            plan_name TEXT NOT NULL DEFAULT 'trial',
+            monthly_task_limit INTEGER NOT NULL DEFAULT 1000,
+            monthly_url_limit INTEGER NOT NULL DEFAULT 3000,
+            monitor_limit INTEGER NOT NULL DEFAULT 50,
+            monthly_token_limit INTEGER NOT NULL DEFAULT 1000000,
+            export_limit INTEGER NOT NULL DEFAULT 200,
+            max_concurrency INTEGER NOT NULL DEFAULT 3,
+            overage_policy TEXT NOT NULL DEFAULT 'reject',
+            notes TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tenant_quota_plans_plan_name ON tenant_quota_plans(plan_name)"
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS field_quality_feedback (
+            id {_id_column_sql(getattr(conn, "dialect", "sqlite"))},
+            feedback_id TEXT NOT NULL UNIQUE,
+            tenant_id TEXT NOT NULL DEFAULT 'default',
+            task_id TEXT NOT NULL,
+            annotation_id TEXT NOT NULL DEFAULT '',
+            template_id TEXT NOT NULL DEFAULT '',
+            profile_id TEXT NOT NULL DEFAULT '',
+            site_domain TEXT NOT NULL DEFAULT '',
+            field_name TEXT NOT NULL,
+            feedback_status TEXT NOT NULL DEFAULT '',
+            original_value_json TEXT NOT NULL DEFAULT 'null',
+            corrected_value_json TEXT NOT NULL DEFAULT 'null',
+            notes TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_field_quality_feedback_tenant_domain ON field_quality_feedback(tenant_id, site_domain)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_field_quality_feedback_template ON field_quality_feedback(template_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_field_quality_feedback_task ON field_quality_feedback(task_id)"
+    )
+
+
 def initialize_task_store_schema(*, connect: ConnectionFactory) -> None:
     with connect() as conn:
         _create_web_tasks_table(conn)
@@ -718,4 +835,5 @@ def initialize_task_store_schema(*, connect: ConnectionFactory) -> None:
         _create_runtime_ops_tables(conn)
         _create_annotation_tables(conn)
         _create_funnel_tables(conn)
+        _create_operational_tables(conn)
         conn.commit()
