@@ -42,6 +42,7 @@ def test_estimate_token_count_positive_for_non_empty():
 
 def test_pricing_for_model_known_vs_unknown():
     assert LLMClient._pricing_for_model("gpt-4o-mini") == (0.15, 0.60)
+    assert LLMClient._pricing_for_model("gpt-5.4-mini") == (0.15, 0.60)
     assert LLMClient._pricing_for_model("gpt-4o") == (5.00, 15.00)
     assert LLMClient._pricing_for_model("claude-sonnet-4") == (3.00, 15.00)
     assert LLMClient._pricing_for_model("totally-unknown") == (0.0, 0.0)
@@ -185,3 +186,20 @@ def test_stream_chat_returns_empty_on_exception():
     )
     assert text == ""
     assert usage is None
+
+
+def test_call_json_short_circuits_after_auth_error():
+    client = _make_client()
+    client._openai_client.chat.completions.create = MagicMock(
+        side_effect=RuntimeError("Error code: 401 - Invalid API key")
+    )
+
+    first = client.call_json("system", "user")
+    second = client.call_json("system", "user again")
+
+    assert first == {}
+    assert second == {}
+    assert client._openai_client.chat.completions.create.call_count == 1
+    stats = client.get_stats()
+    assert stats["auth_error_calls"] == 2
+    assert stats["estimated_cost_usd"] == 0

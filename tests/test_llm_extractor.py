@@ -159,9 +159,45 @@ def test_extract_dynamic_uses_rule_precheck_for_high_confidence_structured_page(
     )
 
     assert called["count"] == 0
-    assert result.extraction_strategy == "rule_precheck"
+    assert result.extraction_strategy == "specialized_rule"
     assert result.data["name"] == "Smart Extractor Pro"
     assert result.data["price"] == "1999"
+
+
+def test_extract_dynamic_uses_specialized_extractor_before_llm(monkeypatch):
+    extractor = LLMExtractor(
+        LLMConfig(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test-model",
+            timeout=5,
+            rule_precheck_enabled=True,
+        )
+    )
+    called = {"count": 0}
+
+    def _never_call_llm(**_kwargs):
+        called["count"] += 1
+        return {}
+
+    monkeypatch.setattr(extractor, "_call_json_llm", _never_call_llm)
+
+    result = extractor.extract_dynamic(
+        text=(
+            "Structured extraction hints:\n"
+            "plan: Team\n"
+            "price: From $49 per seat/month\n"
+            "billing_period: per seat/month\n\n"
+            "Pricing for growing teams."
+        ),
+        source_url="https://example.com/pricing",
+        selected_fields=["plan", "price", "billing_period"],
+    )
+
+    assert called["count"] == 0
+    assert result.extraction_strategy == "specialized_rule"
+    assert result.page_type == "pricing"
+    assert result.data["price"] == "USD 49 per seat/month"
 
 
 def test_extract_dynamic_fallback_uses_rule_fields_when_llm_unavailable(monkeypatch):
@@ -191,7 +227,7 @@ def test_extract_dynamic_fallback_uses_rule_fields_when_llm_unavailable(monkeypa
         source_url="https://example.com/jobs/1",
     )
 
-    assert result.extraction_strategy == "fallback"
+    assert result.extraction_strategy == "specialized_rule"
     assert result.page_type == "job"
     assert result.data["company"] == "OpenAI"
     assert "20k-30k/月" in result.data["salary_range"]
@@ -225,9 +261,71 @@ def test_rule_fallback_extracts_common_english_product_fields(monkeypatch):
         selected_fields=["name", "price", "availability", "plan", "billing_period"],
     )
 
-    assert result.extraction_strategy == "rule_precheck"
+    assert result.extraction_strategy == "specialized_rule"
     assert result.data["name"] == "Smart Extractor Pro"
-    assert result.data["price"] == "$29.99"
-    assert result.data["availability"].lower() == "in stock"
-    assert result.data["plan"] == "Pro"
+    assert result.data["price"] == "USD 29.99 per month"
+    assert result.data["availability"] == "in_stock"
     assert "month" in result.data["billing_period"].lower()
+
+
+def test_rule_fallback_ignores_structured_hint_header_as_value(monkeypatch):
+    extractor = LLMExtractor(
+        LLMConfig(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test-model",
+            timeout=5,
+            rule_precheck_enabled=False,
+        )
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_call_json_llm",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("mock llm down")),
+    )
+
+    result = extractor.extract_dynamic(
+        text=(
+            "Structured extraction hints:\n"
+            "title: NOAA News\n"
+            "summary: Official news and announcements from NOAA.\n\n"
+            "# All news\n"
+        ),
+        source_url="https://example.com/news",
+        selected_fields=["title", "organization", "summary"],
+    )
+
+    assert result.extraction_strategy == "specialized_rule"
+    assert result.data["title"] == "NOAA News"
+    assert result.data.get("organization") != "Structured extraction hints:"
+    assert result.data["summary"].startswith("Official news")
+
+
+def test_rule_fallback_does_not_treat_bare_numbers_as_prices(monkeypatch):
+    extractor = LLMExtractor(
+        LLMConfig(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test-model",
+            timeout=5,
+            rule_precheck_enabled=False,
+        )
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_call_json_llm",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("mock llm down")),
+    )
+
+    result = extractor.extract_dynamic(
+        text=(
+            "Structured extraction hints:\n"
+            "name: Pixel Watch\n"
+            "summary: A smartwatch with 10 sensors and 4 colors.\n"
+        ),
+        source_url="https://example.com/product",
+        selected_fields=["name", "price"],
+    )
+
+    assert result.data["name"] == "Pixel Watch"
+    assert "price" not in result.data

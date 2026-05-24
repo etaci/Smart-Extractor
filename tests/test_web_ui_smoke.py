@@ -350,7 +350,11 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.check("input[name='batch-submit-mode'][value='continue']")
         page.select_option("#batch-group-select", "batch-demo")
         page.check("input[name='batch-submit-mode'][value='new']")
-        page.click("#batch-btn")
+        page.click("[data-section='extract']")
+        batch_call_count = sum(call.startswith("POST /api/batch") for call in calls)
+        page.evaluate("document.getElementById('batch-btn').click()")
+        page.wait_for_timeout(300)
+        assert sum(call.startswith("POST /api/batch") for call in calls) > batch_call_count
 
         page.goto(web_ui_base_url, wait_until="networkidle")
         page.click("[data-section='analyzer']")

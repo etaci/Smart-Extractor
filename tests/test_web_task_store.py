@@ -108,6 +108,45 @@ def test_task_store_records_operational_metrics_and_usage(tmp_path):
     assert usage["totals"]["retry_count"] == 1
 
 
+def test_operational_overview_breaks_down_result_statuses(tmp_path):
+    db_path = tmp_path / "web_tasks.db"
+    store = SQLiteTaskStore(db_path)
+
+    full = store.create(url="https://example.com/full", schema_name="auto", storage_format="json")
+    partial = store.create(url="https://example.com/partial", schema_name="auto", storage_format="json")
+    blocked = store.create(url="https://example.com/blocked", schema_name="auto", storage_format="json")
+    validation = store.create(url="https://example.com/validation", schema_name="auto", storage_format="json")
+
+    store.mark_success(full.task_id, elapsed_ms=10, quality_score=1.0, data={"_validation": {"status": "full_success"}})
+    store.mark_success(partial.task_id, elapsed_ms=10, quality_score=0.6, data={"_validation": {"status": "partial_success"}})
+    store.mark_failed(blocked.task_id, elapsed_ms=10, error="403 Forbidden challenge page")
+    store.mark_failed(
+        validation.task_id,
+        elapsed_ms=10,
+        error="validation failed",
+        data={"_validation": {"status": "failed", "errors": ["missing title"]}},
+    )
+
+    overview = store.build_operational_overview()
+    breakdown = {item["category"]: item["count"] for item in overview["result_breakdown"]}
+
+    assert breakdown["full_success"] == 1
+    assert breakdown["partial_success"] == 1
+    assert breakdown["fetch_failed"] == 1
+    assert breakdown["validation_failed"] == 1
+
+
+def test_task_store_classifies_fetcher_failures_for_metrics():
+    classify = SQLiteTaskStore._classify_failure_for_metrics
+
+    assert classify("404 Not Found") == "not_found"
+    assert classify("403 Forbidden") == "blocked"
+    assert classify("401 Unauthorized") == "blocked"
+    assert classify("429 rate limit exceeded") == "rate_limit"
+    assert classify("anti-bot shell page detected") == "anti_bot_or_shell"
+    assert classify("network connect error") == "network"
+
+
 def test_task_store_rejects_quota_overage_before_batch_creation(tmp_path):
     db_path = tmp_path / "web_tasks.db"
     store = SQLiteTaskStore(db_path)
@@ -254,6 +293,8 @@ def test_task_store_builds_template_scores_from_feedback_and_failures(tmp_path):
     assert scored["success_rate"] == 0.5
     assert scored["success_count"] == 1
     assert scored["failed_count"] == 1
+    assert scored["field_hit_rate"] == 0.6667
+    assert scored["failure_trend"]["timeout"] == 1
     assert scored["field_correct_rate"] == 0.3333
     assert scored["field_missing_rate"] == 0.3333
     assert scored["field_feedback"] == {
@@ -362,7 +403,7 @@ def test_task_store_customer_success_automation_alerts(tmp_path):
         conn.execute(
             """
             UPDATE task_operational_metrics
-            SET updated_at='2026-05-08T00:00:00'
+            SET updated_at='2026-05-10T00:00:00'
             WHERE tenant_id='tenant-template' AND status='success'
             """
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -30,8 +31,10 @@ from smart_extractor.utils.anti_detect import (
 
 _DEFAULT_HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Upgrade-Insecure-Requests": "1",
     "Cache-Control": "max-age=0",
+    "DNT": "1",
 }
 
 _SHELL_TEXT_MAX_LENGTH = 40
@@ -86,6 +89,19 @@ class PlaywrightFetcher(BaseFetcher):
             "extra_http_headers": dict(_DEFAULT_HEADERS),
             "ignore_https_errors": not self._config.verify_ssl,
         }
+        is_mobile = "Mobile/" in user_agent or "Android" in user_agent or "iPhone" in user_agent
+        if is_mobile:
+            options["viewport"] = {"width": 390, "height": 844}
+            options["is_mobile"] = True
+            options["has_touch"] = True
+        if "Chrome/" in user_agent or "Edg/" in user_agent:
+            options["extra_http_headers"].update(
+                {
+                    "sec-ch-ua": '"Chromium";v="131", "Google Chrome";v="131", "Not_A Brand";v="24"',
+                    "sec-ch-ua-mobile": "?1" if is_mobile else "?0",
+                    "sec-ch-ua-platform": '"Android"' if is_mobile else '"Windows"',
+                }
+            )
         resolved_path = self._resolve_storage_state_path(storage_state_path)
         if include_storage_state and resolved_path and resolved_path.exists():
             options["storage_state"] = str(resolved_path)
@@ -224,9 +240,9 @@ class PlaywrightFetcher(BaseFetcher):
             page.evaluate(
                 """
                 () => {
-                    const top = Math.min(window.innerHeight * 0.8, 640);
-                    window.scrollTo(0, top);
-                    window.scrollTo(0, 0);
+                    const steps = [0.35, 0.7, 1.0].map(v => Math.floor(document.body.scrollHeight * v));
+                    for (const top of steps) window.scrollTo(0, top);
+                    window.scrollTo(0, Math.min(window.innerHeight * 0.25, 240));
                 }
                 """
             )
@@ -239,10 +255,14 @@ class PlaywrightFetcher(BaseFetcher):
 
     def _wait_for_meaningful_content(self, page: Page) -> None:
         deadline = time.time() + min(max(self._config.wait_after_load / 1000, 2), 12)
+        last_length = 0
         while time.time() < deadline:
             body_text = self._extract_body_text(page)
             if len(body_text) >= 80 and not looks_like_loading_text(body_text):
                 return
+            if len(body_text) <= last_length + 10:
+                self._warm_up_page(page)
+            last_length = max(last_length, len(body_text))
             page.wait_for_timeout(500)
 
     def _stabilize_page(
@@ -349,6 +369,52 @@ class PlaywrightFetcher(BaseFetcher):
         context.add_init_script(_ANTI_DETECT_SCRIPT)
         return context, browser, False
 
+    @staticmethod
+    def _attach_json_capture(page: Page, captured_json: list[dict[str, str]]) -> None:
+        def handle_response(response) -> None:
+            if len(captured_json) >= 6:
+                return
+            try:
+                headers = response.headers or {}
+                content_type = str(headers.get("content-type") or "").lower()
+                request_url = str(getattr(response, "url", "") or "")
+                if "json" not in content_type and not request_url.lower().endswith(".json"):
+                    return
+                text = response.text()
+                if not text or len(text) > 120_000:
+                    return
+                parsed = json.loads(text)
+                if not isinstance(parsed, (dict, list)):
+                    return
+                captured_json.append(
+                    {
+                        "url": request_url[:240],
+                        "text": json.dumps(parsed, ensure_ascii=False)[:8000],
+                    }
+                )
+            except Exception:
+                return
+
+        try:
+            page.on("response", handle_response)
+        except Exception:
+            return
+
+    @staticmethod
+    def _append_captured_json_hints(html: str, captured_json: list[dict[str, str]]) -> str:
+        if not captured_json:
+            return html
+        scripts = []
+        for index, item in enumerate(captured_json, start=1):
+            payload = item.get("text", "")
+            scripts.append(
+                f'<script type="application/json" data-smart-captured-response="{index}">{payload}</script>'
+            )
+        marker = "\n".join(scripts)
+        if "</body>" in html:
+            return html.replace("</body>", marker + "\n</body>", 1)
+        return f"{html}\n{marker}"
+
     def _fetch_dynamic_attempt(
         self,
         url: str,
@@ -362,7 +428,9 @@ class PlaywrightFetcher(BaseFetcher):
         persistent_context = False
         page: Page | None = None
         try:
-            user_agent = self._config.user_agent or get_random_user_agent()
+            user_agent = self._config.user_agent or get_random_user_agent(
+                mobile=bool(attempt.mobile_user_agent)
+            )
             create_page_method = getattr(self, "_create_page")
             default_create_page = (
                 getattr(create_page_method, "__self__", None) is self
@@ -379,6 +447,8 @@ class PlaywrightFetcher(BaseFetcher):
                     page = create_page_method()
                 except TypeError:
                     page = create_page_method(None)
+            captured_json: list[dict[str, str]] = []
+            self._attach_json_capture(page, captured_json)
             response = page.goto(
                 url,
                 timeout=self._config.timeout,
@@ -411,6 +481,15 @@ class PlaywrightFetcher(BaseFetcher):
                 self._save_screenshot(page, url, suffix=f"attempt{attempt.attempt_no}")
 
             html = page.content()
+            if captured_json:
+                html = self._append_captured_json_hints(html, captured_json)
+            headers = {
+                **headers,
+                "x-smart-fetch-attempt-reason": attempt.reason,
+                "x-smart-fetch-mobile-ua": "1" if attempt.mobile_user_agent else "0",
+                "x-smart-fetch-json-responses": str(len(captured_json)),
+                "x-smart-fetch-html-length": str(len(html or "")),
+            }
             assessment = self._assess_page(
                 page,
                 status_code=status_code,

@@ -1188,6 +1188,34 @@ function formatQuality(value) {
   return numeric > 0 ? `${Math.round(numeric * 100)}%` : "-";
 }
 
+function validationStatusLabel(status) {
+  const normalized = String(status || "").trim();
+  if (normalized === "full_success") return "完整";
+  if (normalized === "partial_success") return "部分成功";
+  if (normalized === "failed") return "质量失败";
+  return normalized || "";
+}
+
+function validationBadgeClass(status) {
+  const normalized = String(status || "").trim();
+  if (normalized === "full_success") return "badge-success";
+  if (normalized === "partial_success") return "badge-running";
+  if (normalized === "failed") return "badge-failed";
+  return "badge-pending";
+}
+
+function validationHint(validation) {
+  const data = validation || {};
+  const missing = Number(data.missing_field_count || 0);
+  const warnings = Array.isArray(data.warnings) ? data.warnings.length : 0;
+  const errors = Array.isArray(data.errors) ? data.errors.length : 0;
+  const parts = [];
+  if (missing > 0) parts.push(`缺失 ${missing} 项`);
+  if (warnings > 0) parts.push(`警告 ${warnings} 条`);
+  if (errors > 0) parts.push(`错误 ${errors} 条`);
+  return parts.join(" / ");
+}
+
 function parseBatchUrls(rawValue) {
   const lines = String(rawValue || "")
     .split(/\r?\n/)
@@ -1779,6 +1807,9 @@ function renderTasksTable(tasks) {
         : task.url;
       const urlShort = urlLabel.length > 54 ? `${urlLabel.slice(0, 54)}...` : urlLabel;
       const progressText = formatTaskProgress(task);
+      const validation = task.validation || {};
+      const validationLabel = validationStatusLabel(validation.status);
+      const validationText = validationHint(validation);
       const modeLabel = isBatch
         ? `batch (${Number(task.completed_items || 0)}/${Number(task.total_items || 0)})`
         : (task.schema_name || "auto");
@@ -1791,6 +1822,8 @@ function renderTasksTable(tasks) {
           <td class="task-status-cell">
             <span class="badge badge-${task.status}">${escHtml(statusLabel(task.status))}</span>
             ${progressText ? `<span class="task-status-meta">${escHtml(progressText)}</span>` : ""}
+            ${validationLabel ? `<span class="badge validation-badge ${validationBadgeClass(validation.status)}">${escHtml(validationLabel)}</span>` : ""}
+            ${validationText ? `<span class="task-status-meta validation-meta">${escHtml(validationText)}</span>` : ""}
           </td>
           <td>${formatQuality(task.quality_score)}</td>
           <td>${elapsed}</td>

@@ -83,6 +83,47 @@ def test_task_detail_includes_growth_entry_for_success_task(monkeypatch, tmp_pat
     )
 
 
+def test_task_detail_does_not_expose_growth_entry_for_partial_success(monkeypatch, tmp_path):
+    client, routes_module = _build_test_client(monkeypatch, tmp_path)
+    task = _create_success_task(
+        routes_module,
+        url="https://example.com/product/partial",
+        page_type="product",
+        data={"name": "Phone", "price": ""},
+        selected_fields=["name", "price"],
+        field_labels={"name": "商品", "price": "价格"},
+        quality_score=0.62,
+    )
+    stored = routes_module._task_store.get(task.task_id)
+    payload = dict(stored.data)
+    payload["_validation"] = {
+        "status": "partial_success",
+        "is_valid": True,
+        "quality_score": 0.62,
+        "completeness_score": 0.5,
+        "warnings": ["价格为空"],
+        "errors": [],
+    }
+    routes_module._task_store.mark_success(
+        task.task_id,
+        elapsed_ms=24.0,
+        quality_score=0.62,
+        data=payload,
+    )
+
+    response = client.get(f"/api/task/{task.task_id}", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["validation"]["status"] == "partial_success"
+    assert body["validation"]["missing_fields"] == ["price"]
+    assert body["growth_entry"]["eligible"] is False
+    events = routes_module._task_store.list_funnel_events(limit=10, tenant_id="default")
+    assert not any(
+        item.stage == "growth_entry_exposed" and item.task_id == task.task_id for item in events
+    )
+
+
 def test_api_task_can_promote_success_task_to_template(monkeypatch, tmp_path):
     client, routes_module = _build_test_client(monkeypatch, tmp_path)
     task = _create_success_task(

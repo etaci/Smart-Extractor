@@ -10,6 +10,7 @@ from typing import Optional
 from bs4 import BeautifulSoup, Comment
 from loguru import logger
 
+from smart_extractor.cleaner.structured_hints import build_structured_hints
 from smart_extractor.config import CleanerConfig
 
 
@@ -91,6 +92,7 @@ class HTMLCleaner:
         html: str,
         selector: Optional[str] = None,
         max_length: Optional[int] = None,
+        selected_fields: Optional[list[str]] = None,
     ) -> str:
         """
         清洗 HTML 并返回纯文本。
@@ -108,6 +110,11 @@ class HTMLCleaner:
             return ""
 
         max_len = max_length or self._config.max_text_length
+        structured_hints = (
+            build_structured_hints(html, selected_fields=selected_fields)
+            if selected_fields is not None
+            else ""
+        )
 
         # 解析 HTML
         soup = BeautifulSoup(html, "lxml")
@@ -153,6 +160,8 @@ class HTMLCleaner:
 
         # 清理空白行和多余空格
         text = self._normalize_whitespace(text)
+        if structured_hints:
+            text = f"{structured_hints}\n\n{text}" if text else structured_hints
 
         # 智能截断
         if len(text) > max_len:

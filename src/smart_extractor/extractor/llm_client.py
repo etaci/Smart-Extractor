@@ -56,6 +56,8 @@ class LLMClient:
         self._estimated_cost_usd = 0.0
         self._api_usage_calls = 0
         self._estimated_usage_calls = 0
+        self._auth_error_calls = 0
+        self._auth_unavailable = False
 
         logger.info(
             "LLM 客户端初始化完成 (model={}, base_url={})",
@@ -115,8 +117,16 @@ class LLMClient:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
+        if self._auth_unavailable:
+            self._record_auth_error_call(start_time)
+            logger.warning("LLM 鉴权已不可用，本次直接降级为本地规则兜底")
+            return {}
 
         message, usage = self._stream_chat(messages, use_json_format=True)
+        if self._auth_unavailable:
+            self._record_auth_error_call(start_time)
+            logger.warning("LLM 鉴权失败，跳过后续重试并交由上层兜底")
+            return {}
         if message:
             usage = usage or self._estimate_usage(
                 prompt_text=self._stringify_messages(messages),
@@ -127,6 +137,10 @@ class LLMClient:
 
         logger.warning("json_object 流式模式返回为空，降级为纯流式模式重试")
         message, usage = self._stream_chat(messages, use_json_format=False)
+        if self._auth_unavailable:
+            self._record_auth_error_call(start_time)
+            logger.warning("LLM 鉴权失败，跳过非流式重试并交由上层兜底")
+            return {}
         if message:
             usage = usage or self._estimate_usage(
                 prompt_text=self._stringify_messages(messages),
@@ -154,6 +168,10 @@ class LLMClient:
                 return _safe_json_loads(message)
         except Exception as exc:
             logger.warning("非流式调用也失败: {}", exc)
+            if self._is_auth_error(exc):
+                self._auth_unavailable = True
+                self._record_auth_error_call(start_time)
+                return {}
 
         usage = self._estimate_usage(
             prompt_text=self._stringify_messages(messages),
@@ -211,7 +229,20 @@ class LLMClient:
             return result, api_usage
         except Exception as exc:
             logger.warning("流式调用异常: {}", exc)
+            if self._is_auth_error(exc):
+                self._auth_unavailable = True
             return "", None
+
+    @staticmethod
+    def _is_auth_error(error: Any) -> bool:
+        text = str(error or "").lower()
+        return "401" in text or "invalid api key" in text or "missing api key" in text
+
+    def _record_auth_error_call(self, start_time: float) -> None:
+        self._record_call(
+            time.time() - start_time,
+            usage=UsageSample(prompt_tokens=0, completion_tokens=0, source="auth_error"),
+        )
 
     @staticmethod
     def _stringify_messages(messages: list[dict[str, str]]) -> str:
@@ -301,6 +332,8 @@ class LLMClient:
             "gpt-4.1-mini": (0.40, 1.60),
             "gpt-4o": (5.00, 15.00),
             "gpt-4.1": (2.00, 8.00),
+            "gpt-5.4-mini": (0.15, 0.60),
+            "gpt-5-mini": (0.15, 0.60),
             "claude-3-5-haiku": (0.80, 4.00),
             "claude-3-5-sonnet": (3.00, 15.00),
             "claude-3-7-sonnet": (3.00, 15.00),
@@ -339,6 +372,8 @@ class LLMClient:
         self._estimated_cost_usd += estimated_cost
         if usage.source == "api":
             self._api_usage_calls += 1
+        elif usage.source == "auth_error":
+            self._auth_error_calls += 1
         else:
             self._estimated_usage_calls += 1
         logger.info(
@@ -365,5 +400,6 @@ class LLMClient:
             "estimated_cost_usd": round(self._estimated_cost_usd, 6),
             "api_usage_calls": self._api_usage_calls,
             "estimated_usage_calls": self._estimated_usage_calls,
+            "auth_error_calls": self._auth_error_calls,
             "api_usage_ratio": round(self._api_usage_calls / total, 4),
         }

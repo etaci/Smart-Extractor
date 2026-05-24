@@ -440,6 +440,18 @@ def run_extraction(
             elapsed_ms = result.elapsed_ms or (time.perf_counter() - start_at) * 1000
             if result.success:
                 saved_data = result.data.model_dump() if result.data else {}
+                validation = getattr(result, "validation", None)
+                if validation is not None:
+                    saved_data["_validation"] = {
+                        "status": getattr(validation, "status", "full_success"),
+                        "is_valid": bool(getattr(validation, "is_valid", True)),
+                        "quality_score": float(getattr(validation, "quality_score", 0.0) or 0.0),
+                        "completeness_score": float(
+                            getattr(validation, "completeness_score", 0.0) or 0.0
+                        ),
+                        "warnings": list(getattr(validation, "warnings", []) or []),
+                        "errors": list(getattr(validation, "errors", []) or []),
+                    }
                 extractor_stats = getattr(result, "extractor_stats", {}) or {}
                 if extractor_stats:
                     saved_data["_extractor_stats"] = dict(extractor_stats)
@@ -478,6 +490,11 @@ def run_extraction(
                     else 0.0
                 )
                 if fetch_result is not None:
+                    fetch_headers = (
+                        fetch_result.headers
+                        if isinstance(getattr(fetch_result, "headers", None), dict)
+                        else {}
+                    )
                     saved_data["_runtime_metrics"] = {
                         "fetcher_type": "static" if use_static else "playwright",
                         "fetch_elapsed_ms": fetch_elapsed_ms,
@@ -485,6 +502,22 @@ def run_extraction(
                         "retry_count": retry_count,
                         "retry_cost_usd": round(task_cost * max(retry_count, 0), 6),
                         "total_elapsed_ms": float(elapsed_ms or 0.0),
+                        "fetch_json_response_count": int(
+                            fetch_headers.get("x-smart-fetch-json-responses", 0) or 0
+                        ),
+                        "mobile_ua_fallback": str(
+                            fetch_headers.get("x-smart-fetch-mobile-ua", "0") or "0"
+                        )
+                        == "1",
+                        "fetch_rescue": str(
+                            fetch_headers.get("x-smart-fetch-rescue", "") or ""
+                        ),
+                        "static_html_length": int(
+                            fetch_headers.get("x-smart-static-html-length", 0) or 0
+                        ),
+                        "dynamic_html_length": int(
+                            fetch_headers.get("x-smart-dynamic-html-length", 0) or 0
+                        ),
                     }
                 has_execution_context = any(
                     [

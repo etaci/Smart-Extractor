@@ -1,5 +1,6 @@
 from smart_extractor.config import FetcherConfig
 from smart_extractor.fetcher.playwright import PlaywrightFetcher
+from smart_extractor.utils.anti_detect import build_access_attempts
 
 
 class DummyContext:
@@ -111,6 +112,31 @@ def test_playwright_fetcher_builds_context_options_with_profile(tmp_path):
     assert options["extra_http_headers"]["Accept-Language"].startswith("zh-CN")
 
 
+def test_playwright_fetcher_builds_mobile_context_options():
+    fetcher = PlaywrightFetcher(FetcherConfig())
+
+    options = fetcher._build_context_options(
+        "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    )
+
+    assert options["is_mobile"] is True
+    assert options["has_touch"] is True
+    assert options["viewport"] == {"width": 390, "height": 844}
+    assert options["extra_http_headers"]["sec-ch-ua-mobile"] == "?1"
+
+
+def test_access_attempts_include_mobile_ua_fallback():
+    attempts = build_access_attempts(
+        "https://example.com",
+        FetcherConfig(fetch_max_attempts=1),
+        prefer_dynamic=True,
+    )
+
+    assert any(attempt.reason == "mobile_ua_fallback" for attempt in attempts)
+    assert any(attempt.mobile_user_agent for attempt in attempts)
+
+
 def test_playwright_fetcher_creates_context_and_injects_anti_detect(tmp_path):
     storage_state_path = tmp_path / "state.json"
     storage_state_path.write_text("{}", encoding="utf-8")
@@ -189,7 +215,8 @@ def test_playwright_fetcher_waits_until_meaningful_content():
 
     fetcher._wait_for_meaningful_content(page)
 
-    assert page.wait_calls == [500, 500]
+    assert page.wait_calls == [600, 500, 600, 500]
+    assert page.evaluate_calls == 2
 
 
 def test_playwright_fetcher_detects_shell_page():

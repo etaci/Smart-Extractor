@@ -37,9 +37,31 @@ _FALLBACK_NOISE_PATTERNS = [
 ]
 _FALLBACK_NOISE_RE = re.compile("|".join(_FALLBACK_NOISE_PATTERNS), re.MULTILINE)
 
-_FALLBACK_PRODUCT_MARKERS = ("价格", "售价", "商品", "品牌", "库存", "规格")
-_FALLBACK_JOB_MARKERS = ("任职要求", "岗位职责", "职位描述", "薪资", "工作地点")
-_FALLBACK_PRODUCT_FIELDS = ["name", "price", "brand", "description", "summary"]
+_FALLBACK_PRODUCT_MARKERS = (
+    "价格",
+    "售价",
+    "商品",
+    "品牌",
+    "库存",
+    "规格",
+    "product",
+    "offer",
+)
+_FALLBACK_JOB_MARKERS = (
+    "任职要求",
+    "岗位职责",
+    "职位描述",
+    "薪资",
+    "工作地点",
+    "jobposting",
+    "hiringorganization",
+)
+_FALLBACK_PRICE_MARKERS = ("pricing", "price", "plan", "tier", "套餐", "订阅", "月付", "年付")
+_FALLBACK_POLICY_MARKERS = ("政策", "法规", "规章", "条例", "文号", "发布机关", "legislation", "policy")
+_FALLBACK_NOTICE_MARKERS = ("公告", "通知", "公示", "发文", "机构", "notice")
+_FALLBACK_NEWS_MARKERS = ("newsarticle", "article", "新闻", "资讯", "发布于")
+_FALLBACK_PRODUCT_FIELDS = ["name", "price", "brand", "availability", "description", "summary"]
+_FALLBACK_PRICE_FIELDS = ["plan", "price", "billing_period", "description", "summary"]
 _FALLBACK_JOB_FIELDS = [
     "title",
     "company",
@@ -48,6 +70,8 @@ _FALLBACK_JOB_FIELDS = [
     "requirements",
     "summary",
 ]
+_FALLBACK_NOTICE_FIELDS = ["title", "publish_date", "agency", "organization", "summary", "content"]
+_FALLBACK_POLICY_FIELDS = ["title", "publish_date", "agency", "policy_number", "summary", "content"]
 _FALLBACK_ARTICLE_FIELDS = ["title", "author", "publish_date", "summary", "content"]
 
 
@@ -57,17 +81,34 @@ def resolve_fallback_profile(
 ) -> tuple[str, list[str]]:
     if selected_fields:
         normalized = [field for field in selected_fields if str(field or "").strip()]
-        if {"price", "brand", "name", "stock"} & set(normalized):
+        requested = set(normalized)
+        if {"brand", "name", "stock", "availability"} & requested:
             return "product", normalized
-        if {"company", "salary_range", "location", "requirements"} & set(normalized):
+        if {"plan", "billing_period"} & requested:
+            return "pricing", normalized
+        if {"price"} & requested:
+            return "product", normalized
+        if {"company", "salary_range", "location", "requirements"} & requested:
             return "job", normalized
+        if {"policy_number"} & requested:
+            return "policy", normalized
+        if {"agency", "organization"} & requested:
+            return "notice", normalized
         return "article", normalized
 
-    normalized_text = str(text or "")
+    normalized_text = str(text or "").lower()
     if any(marker in normalized_text for marker in _FALLBACK_PRODUCT_MARKERS):
         return "product", list(_FALLBACK_PRODUCT_FIELDS)
     if any(marker in normalized_text for marker in _FALLBACK_JOB_MARKERS):
         return "job", list(_FALLBACK_JOB_FIELDS)
+    if any(marker in normalized_text for marker in _FALLBACK_PRICE_MARKERS):
+        return "pricing", list(_FALLBACK_PRICE_FIELDS)
+    if any(marker in normalized_text for marker in _FALLBACK_POLICY_MARKERS):
+        return "policy", list(_FALLBACK_POLICY_FIELDS)
+    if any(marker in normalized_text for marker in _FALLBACK_NOTICE_MARKERS):
+        return "notice", list(_FALLBACK_NOTICE_FIELDS)
+    if any(marker in normalized_text for marker in _FALLBACK_NEWS_MARKERS):
+        return "news", list(_FALLBACK_ARTICLE_FIELDS)
     return "article", list(_FALLBACK_ARTICLE_FIELDS)
 
 
@@ -111,7 +152,7 @@ def build_dynamic_fallback_result(
     if fallback_text and (
         "content" in fallback_fields
         or not rule_data
-        or page_type in {"article", "blog", "news"}
+        or page_type in {"article", "blog", "news", "notice", "policy"}
     ):
         rule_data.setdefault("content", fallback_text)
 

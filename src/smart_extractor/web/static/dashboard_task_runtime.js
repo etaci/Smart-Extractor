@@ -240,6 +240,30 @@ window.SmartExtractorDashboardTaskRuntime = function createDashboardTaskRuntime(
     return ["pending", "queued"].includes(task.status) ? "等待调度中" : `${percent}% · 正在执行`;
   }
 
+  function extractionStrategyLabel(strategy) {
+    const normalized = String(strategy || "").trim().toLowerCase();
+    if (normalized === "specialized_rule") return "专用抽取器";
+    if (normalized === "rule_precheck") return "规则预检";
+    if (normalized === "rule") return "规则复用";
+    if (normalized === "llm") return "LLM 抽取";
+    if (normalized === "fallback") return "兜底抽取";
+    if (normalized === "rule_fallback") return "规则兜底";
+    return normalized || "未记录";
+  }
+
+  function validationStatusLabel(status) {
+    const normalized = String(status || "").trim();
+    if (normalized === "full_success") return "质量校验：完整成功";
+    if (normalized === "partial_success") return "质量校验：部分成功";
+    if (normalized === "failed" || normalized === "validation_failed") return "质量校验：未通过";
+    return normalized ? `质量校验：${normalized}` : "质量校验：未记录";
+  }
+
+  function normalizationLabel(details) {
+    const payload = details && typeof details === "object" ? details : {};
+    return payload.normalization_version ? "字段格式已规范化" : "字段格式未记录";
+  }
+
   function renderTasksTable(tasks) {
     const tbody = document.getElementById("tasks-body");
     if (!tbody) {
@@ -260,6 +284,9 @@ window.SmartExtractorDashboardTaskRuntime = function createDashboardTaskRuntime(
           ? `batch (${Number(task.completed_items || 0)}/${Number(task.total_items || 0)})`
           : task.schema_name || "auto";
         const progressText = formatTaskProgress(task);
+        const strategyLabel = extractionStrategyLabel(task.extraction_strategy);
+        const normalizationText = normalizationLabel(task.strategy_details || {});
+        const validationText = validationStatusLabel((task.validation || {}).status);
         const diagnosis = task.failure_diagnosis || {};
         const diagnosisHtml =
           diagnosis.actionable && task.status === "failed"
@@ -278,6 +305,8 @@ window.SmartExtractorDashboardTaskRuntime = function createDashboardTaskRuntime(
             <td class="task-status-cell">
               ${statusBadge}
               ${progressText ? `<span class="task-status-meta">${escHtml(progressText)}</span>` : ""}
+              <span class="task-status-meta">${escHtml(strategyLabel)} · ${escHtml(normalizationText)}</span>
+              <span class="task-status-meta">${escHtml(validationText)}</span>
               ${diagnosisHtml}
             </td>
             <td>${formatQuality(task.quality_score)}</td>

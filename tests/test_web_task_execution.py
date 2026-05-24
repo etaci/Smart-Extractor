@@ -142,7 +142,8 @@ def test_run_extraction_executes_pipeline_and_updates_monitor(monkeypatch):
     assert captured["run_kwargs"]["force_strategy"] == "llm"
     assert len(task_store.progress_updates) == 6
     assert task_store.success_payload["quality_score"] == 0.97
-    assert task_store.success_payload["data"] == {"title": "示例标题"}
+    assert task_store.success_payload["data"]["title"] == "示例标题"
+    assert task_store.success_payload["data"]["_validation"]["status"] == "full_success"
     assert task_store.monitor_result_updates == [("mon-000001", "task-000001")]
     assert sync_calls == [("mon-000001", "task-000001")]
 

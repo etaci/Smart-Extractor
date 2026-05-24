@@ -862,6 +862,11 @@ def serialize_template(template: Any) -> dict[str, object]:
 def serialize_task_list_item(task: Any) -> dict[str, object]:
     payload = task.to_dict()
     data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    strategy_details = (
+        data.get("strategy_details")
+        if isinstance(data.get("strategy_details"), dict)
+        else {}
+    )
     return {
         "task_id": payload.get("task_id", ""),
         "url": payload.get("url", ""),
@@ -873,12 +878,59 @@ def serialize_task_list_item(task: Any) -> dict[str, object]:
         "created_at": payload.get("created_at", ""),
         "elapsed_ms": payload.get("elapsed_ms", 0.0),
         "quality_score": payload.get("quality_score", 0.0),
+        "extraction_strategy": str(data.get("extraction_strategy") or "").strip(),
+        "strategy_details": strategy_details,
+        "validation": summarize_task_validation(data),
         "progress_percent": payload.get("progress_percent", 0.0),
         "progress_stage": payload.get("progress_stage", ""),
         "batch_group_id": payload.get("batch_group_id", ""),
         "task_kind": payload.get("task_kind", "single"),
         "total_items": payload.get("total_items", 0),
         "completed_items": payload.get("completed_items", 0),
+    }
+
+
+def summarize_task_validation(data: dict[str, Any] | None) -> dict[str, object]:
+    payload = data if isinstance(data, dict) else {}
+    validation = (
+        payload.get("_validation")
+        if isinstance(payload.get("_validation"), dict)
+        else {}
+    )
+    extracted = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    selected_fields = (
+        [
+            str(item).strip()
+            for item in payload.get("selected_fields", [])
+            if str(item).strip()
+        ]
+        if isinstance(payload.get("selected_fields"), list)
+        else []
+    )
+    missing_fields = [
+        field
+        for field in selected_fields
+        if not isinstance(extracted, dict) or extracted.get(field) in (None, "", [], {})
+    ]
+    warnings = (
+        [str(item) for item in validation.get("warnings", []) if str(item).strip()]
+        if isinstance(validation.get("warnings"), list)
+        else []
+    )
+    errors = (
+        [str(item) for item in validation.get("errors", []) if str(item).strip()]
+        if isinstance(validation.get("errors"), list)
+        else []
+    )
+    return {
+        "status": str(validation.get("status") or "").strip(),
+        "is_valid": bool(validation.get("is_valid", True)),
+        "quality_score": float(validation.get("quality_score", 0.0) or 0.0),
+        "completeness_score": float(validation.get("completeness_score", 0.0) or 0.0),
+        "warnings": warnings,
+        "errors": errors,
+        "missing_fields": missing_fields,
+        "missing_field_count": len(missing_fields),
     }
 
 

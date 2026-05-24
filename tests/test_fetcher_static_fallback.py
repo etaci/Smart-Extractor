@@ -37,3 +37,32 @@ def test_static_fetcher_can_disable_dynamic_escalation():
     )
 
     assert fetcher._should_escalate_to_dynamic(result) is False
+
+
+def test_static_fetcher_does_not_escalate_hard_404():
+    fetcher = StaticFetcher(FetcherConfig(static_fallback_to_dynamic=True))
+    result = FetchResult(
+        url="https://example.com/missing",
+        status_code=404,
+        html="<html><body>Not found</body></html>",
+    )
+
+    assert fetcher._should_escalate_to_dynamic(result) is False
+
+
+def test_static_fetcher_headers_include_browser_hints():
+    fetcher = StaticFetcher(
+        FetcherConfig(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            )
+        )
+    )
+
+    headers = fetcher._build_headers()
+
+    assert headers["User-Agent"].startswith("Mozilla/5.0")
+    assert headers["Accept-Encoding"] == "gzip, deflate, br"
+    assert headers["sec-ch-ua-platform"] == '"Windows"'

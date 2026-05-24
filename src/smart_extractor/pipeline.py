@@ -8,6 +8,7 @@ from typing import Callable, Optional, Type
 from loguru import logger
 
 from smart_extractor.cleaner.html_cleaner import HTMLCleaner
+from smart_extractor.cleaner.structured_hints import build_structured_hints
 from smart_extractor.config import AppConfig, load_config
 from smart_extractor.extractor.learned_profile_store import LearnedProfileStore
 from smart_extractor.extractor.llm_extractor import LLMExtractor
@@ -39,6 +40,7 @@ class PipelineResult:
         self.error: Optional[str] = None
         self.elapsed_ms: float = 0.0
         self.extractor_stats: dict[str, float] = {}
+        self.validation_status: str = "failed"
 
     @property
     def summary(self) -> str:
@@ -164,17 +166,22 @@ class ExtractionPipeline:
             return result
         self._deduplicator.mark_visited(url)
         self._fire_hooks("after_fetch", url=url, fetch_result=fetch_result)
-        cleaned_text = self._cleaner.clean(fetch_result.html, selector=css_selector)
-        result.cleaned_text = cleaned_text
-        if self._looks_like_verification_page(cleaned_text):
+        base_cleaned_text = self._cleaner.clean(fetch_result.html, selector=css_selector)
+        if self._looks_like_verification_page(base_cleaned_text):
             result.error = self.normalize_user_facing_error("目标站点返回安全验证页面，当前无法提取真实内容")
             return result
-        if self._looks_like_loading_page(cleaned_text):
+        if self._looks_like_loading_page(base_cleaned_text):
             result.error = self.normalize_user_facing_error("页面仍停留在加载状态，当前无法提取真实内容")
             return result
-        if not cleaned_text.strip():
+        if not base_cleaned_text.strip():
             result.error = self.normalize_user_facing_error("网页清洗后为空")
             return result
+        cleaned_text = self._attach_structured_hints(
+            fetch_result.html,
+            base_cleaned_text,
+            selected_fields=selected_fields,
+        )
+        result.cleaned_text = cleaned_text
         self._fire_hooks("after_clean", cleaned_text=cleaned_text)
         if use_dynamic_mode:
             extracted_data = self._run_dynamic_extraction(cleaned_text, source_url=url, selected_fields=selected_fields or [], force_strategy=force_strategy)
@@ -190,6 +197,7 @@ class ExtractionPipeline:
         self._fire_hooks("after_extract", data=extracted_data, meta=meta)
         validation = self._validator.validate(extracted_data)
         result.validation = validation
+        result.validation_status = getattr(validation, "status", "failed") or "failed"
         meta.confidence_score = validation.quality_score
         self._fire_hooks("after_validate", validation=validation)
         if not skip_storage:
@@ -203,8 +211,22 @@ class ExtractionPipeline:
         if not validation.is_valid:
             result.error = self.normalize_user_facing_error("提取结果未通过质量校验")
             return result
+        if result.validation_status == "partial_success":
+            result.error = self.normalize_user_facing_error("提取结果为部分成功，部分字段缺失或格式需要人工确认")
         result.success = True
         return result
+
+    @staticmethod
+    def _attach_structured_hints(
+        html: str,
+        cleaned_text: str,
+        *,
+        selected_fields: Optional[list[str]] = None,
+    ) -> str:
+        hints = build_structured_hints(html, selected_fields=selected_fields)
+        if not hints:
+            return cleaned_text
+        return f"{hints}\n\n{cleaned_text}"
 
     async def _fetch_async(self, url: str) -> FetchResult:
         import asyncio
@@ -331,7 +353,10 @@ class ExtractionPipeline:
             raise RuntimeError(self.normalize_user_facing_error(f"网页抓取失败: {fetch_result.error or fetch_result.status_code}"))
         if fetch_result.is_shell_page:
             raise RuntimeError(self.normalize_user_facing_error(self._shell_page_error_message()))
-        cleaned_text = self._cleaner.clean(fetch_result.html, selector=css_selector)
+        cleaned_text = self._cleaner.clean(
+            fetch_result.html,
+            selector=css_selector,
+        )
         if self._looks_like_verification_page(cleaned_text):
             raise RuntimeError(self.normalize_user_facing_error("目标站点返回安全验证页面，当前无法分析真实页面"))
         if self._looks_like_loading_page(cleaned_text):

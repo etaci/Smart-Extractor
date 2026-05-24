@@ -352,6 +352,30 @@ def register_task_routes(
                     ),
                 },
             }
+        validation_status = str(
+            (detail.get("validation") or {}).get("status") or ""
+        ).strip()
+        if validation_status == "partial_success":
+            return {
+                "eligible": False,
+                "reason": "部分成功任务仅展示质量提示，不再作为结果页增长入口自动推荐人工确认、字段反馈或转监控",
+                "recommended_template_package_id": "",
+                "recommended_template_package_name": "",
+                "template_draft": None,
+                "monitor_draft": None,
+                "conversion_path": [],
+                "recommended_actions": [],
+                "existing_template_count": 0,
+                "existing_monitor_count": 0,
+                "history_signal": {
+                    "repeat_url": bool(
+                        detail.get("history_summary", {}).get("repeat_url", False)
+                    ),
+                    "has_detected_changes": bool(
+                        detail.get("comparison", {}).get("changed", False)
+                    ),
+                },
+            }
 
         selected_fields = _task_selected_fields(task)
         if not selected_fields:

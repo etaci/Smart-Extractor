@@ -174,3 +174,22 @@ class TestHTMLCleanerEdgeCases:
         result = self.cleaner.clean(sample_html_minimal)
         assert "标题" in result
         assert "正文内容" in result
+def test_structured_hints_are_prepended_for_selected_fields():
+    html = """
+    <html>
+      <head>
+        <title>Example Product</title>
+        <meta property="product:price:currency" content="USD">
+        <meta property="product:price:amount" content="29.99">
+        <meta property="product:availability" content="InStock">
+      </head>
+      <body><h1>Noisy page heading</h1></body>
+    </html>
+    """
+    result = HTMLCleaner().clean(
+        html,
+        selected_fields=["name", "price", "availability"],
+    )
+    assert result.startswith("Structured extraction hints:")
+    assert "price: USD 29.99" in result
+    assert "availability: InStock" in result

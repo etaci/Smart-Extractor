@@ -19,6 +19,88 @@ window.SmartExtractorTaskDetailRender = (() => {
     return numeric > 0 ? `${Math.round(numeric)} ms` : "-";
   }
 
+  function validationStatusLabel(status) {
+    const normalized = String(status || "").trim();
+    if (normalized === "full_success") return "完整成功";
+    if (normalized === "partial_success") return "部分成功";
+    if (normalized === "failed") return "质量失败";
+    return normalized || "未记录";
+  }
+
+  function validationBadgeClass(status) {
+    const normalized = String(status || "").trim();
+    if (normalized === "full_success") return "badge-success";
+    if (normalized === "partial_success") return "badge-running";
+    if (normalized === "failed") return "badge-failed";
+    return "badge-pending";
+  }
+
+  function extractionStrategyLabel(strategy) {
+    const normalized = String(strategy || "").trim().toLowerCase();
+    if (normalized === "specialized_rule") return "专用抽取器";
+    if (normalized === "rule_precheck") return "规则预检";
+    if (normalized === "rule") return "规则复用";
+    if (normalized === "llm") return "LLM 抽取";
+    if (normalized === "fallback") return "兜底抽取";
+    if (normalized === "rule_fallback") return "规则兜底";
+    return normalized || "未记录";
+  }
+
+  function normalizationLabel(details) {
+    const payload = details && typeof details === "object" ? details : {};
+    return payload.normalization_version
+      ? `字段格式已规范化（${payload.normalization_version}）`
+      : "字段格式未记录";
+  }
+
+  function renderValidation(validation) {
+    const box = document.getElementById("task-validation-box");
+    const badge = document.getElementById("task-validation-status");
+    const container = document.getElementById("task-validation-summary");
+    if (!box || !badge || !container) {
+      return;
+    }
+    const data = validation || {};
+    const status = String(data.status || "").trim();
+    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+    const errors = Array.isArray(data.errors) ? data.errors : [];
+    const missingFields = Array.isArray(data.missing_fields) ? data.missing_fields : [];
+    if (!status && !warnings.length && !errors.length && !missingFields.length) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    badge.className = `badge ${validationBadgeClass(status)}`;
+    badge.textContent = validationStatusLabel(status);
+    const completeness = Number(data.completeness_score || 0);
+    const quality = Number(data.quality_score || 0);
+    const metricLines = [
+      `完整度 ${Number.isFinite(completeness) && completeness > 0 ? `${(completeness * 100).toFixed(1)}%` : "-"}`,
+      `质量分 ${Number.isFinite(quality) && quality > 0 ? `${(quality * 100).toFixed(1)}%` : "-"}`,
+      `缺失字段 ${missingFields.length}`,
+    ];
+    container.innerHTML = `
+      <div class="validation-metrics">
+        ${metricLines.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+      </div>
+      ${
+        missingFields.length
+          ? `<div class="validation-block"><strong>字段缺失</strong><p>${escapeHtml(missingFields.join("、"))}</p></div>`
+          : ""
+      }
+      ${
+        warnings.length
+          ? `<div class="validation-block"><strong>警告</strong><ul>${warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>`
+          : ""
+      }
+      ${
+        errors.length
+          ? `<div class="validation-block"><strong>错误</strong><ul>${errors.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>`
+          : ""
+      }
+    `;
+  }
+
   function normalizeFormattedText(value) {
     const text = String(value || "");
     if (!text.trim()) {
@@ -297,10 +379,16 @@ window.SmartExtractorTaskDetailRender = (() => {
     document.getElementById("task-success-runs").textContent = String(
       detail.history_summary.success_runs || 0
     );
-    document.getElementById("task-extraction-strategy").textContent =
+    const strategyDetails =
+      detail.data && detail.data.strategy_details && typeof detail.data.strategy_details === "object"
+        ? detail.data.strategy_details
+        : {};
+    const strategyText =
       detail.data && detail.data.extraction_strategy
-        ? detail.data.extraction_strategy
+        ? extractionStrategyLabel(detail.data.extraction_strategy)
         : "-";
+    document.getElementById("task-extraction-strategy").textContent =
+      strategyText === "-" ? "-" : `${strategyText} · ${normalizationLabel(strategyDetails)}`;
     document.getElementById("task-learned-profile").textContent =
       detail.data && detail.data.learned_profile_id
         ? detail.data.learned_profile_id
@@ -356,6 +444,8 @@ window.SmartExtractorTaskDetailRender = (() => {
       }
     }
 
+    renderValidation(detail.validation || (detail.data && detail.data._validation) || {});
+
     const formattedText = normalizeFormattedText(
       detail.data && detail.data.formatted_text
     );
@@ -384,6 +474,7 @@ window.SmartExtractorTaskDetailRender = (() => {
     renderHistory,
     renderBatchChildren,
     renderComparison,
+    renderValidation,
     applyTaskDetail,
   };
 })();

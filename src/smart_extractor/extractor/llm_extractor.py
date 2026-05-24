@@ -16,6 +16,7 @@ from smart_extractor.extractor.llm_analysis import (
     normalize_compare_analysis,
     normalize_context_analysis,
 )
+from smart_extractor.extractor.field_normalizer import normalize_dynamic_result
 from smart_extractor.extractor.llm_client import LLMClient
 from smart_extractor.extractor.llm_fallbacks import (
     build_compare_fallback,
@@ -46,11 +47,24 @@ from smart_extractor.extractor.llm_response import (
 )
 from smart_extractor.extractor.llm_task_plan import normalize_task_plan_payload
 from smart_extractor.extractor.rule_extractor import RuleBasedDynamicExtractor
+from smart_extractor.extractor.specialized_extractors import SpecializedPageExtractor
 from smart_extractor.models.base import BaseExtractModel, DynamicExtractResult
 from smart_extractor.utils.display import build_field_labels, get_field_label
 
 _TIKTOKEN_ENCODING = None
 _TIKTOKEN_LOADED = False
+
+_SPECIALIZED_DYNAMIC_GUIDE = """
+Prefer high-confidence structured sources before free-text inference:
+- Product: Product/Offer JSON-LD, meta price, brand, availability.
+- PricingPlan: OfferCatalog, PriceSpecification, plan cards, billing period.
+- JobPosting: JobPosting JSON-LD, hiring organization, location, salary, validThrough.
+- NewsArticle: headline, datePublished, author, articleBody.
+- PolicyDoc: title, agency/organization, publish date, policy number, content.
+Normalize prices, dates, salary ranges, and billing periods into stable values.
+When only some requested fields are supported by the page, return the available
+fields instead of inventing values.
+""".strip()
 
 
 def _get_tiktoken_encoding():
@@ -74,6 +88,7 @@ class LLMExtractor(BaseExtractor):
 
         self._client = LLMClient(self._config)
         self._rule_extractor = RuleBasedDynamicExtractor()
+        self._specialized_extractor = SpecializedPageExtractor()
 
     def extract(
         self,
@@ -97,6 +112,17 @@ class LLMExtractor(BaseExtractor):
             if field and field.strip()
         ]
 
+        page_type, fallback_fields = self._resolve_fallback_profile(text, normalized_fields)
+        specialized_result = self._specialized_extractor.extract(
+            text=text,
+            source_url=source_url,
+            page_type=page_type,
+            selected_fields=normalized_fields or fallback_fields,
+        )
+        if specialized_result is not None:
+            logger.info("专用抽取器命中，跳过 LLM 调用: {}", source_url)
+            return specialized_result
+
         precheck_result = self._run_rule_precheck(
             text=text,
             source_url=source_url,
@@ -116,6 +142,7 @@ class LLMExtractor(BaseExtractor):
             source_url=source_url,
             text=self._truncate_text(text),
         )
+        prompt = f"{_SPECIALIZED_DYNAMIC_GUIDE}\n\n{prompt}"
 
         payload: dict[str, Any] | None = None
         try:
@@ -203,7 +230,7 @@ class LLMExtractor(BaseExtractor):
         }
         formatted_text = _format_dynamic_text(normalized_labels, filtered_data)
 
-        return DynamicExtractResult(
+        return normalize_dynamic_result(DynamicExtractResult(
             page_type=page_type,
             candidate_fields=candidate_fields,
             selected_fields=actual_fields,
@@ -212,7 +239,7 @@ class LLMExtractor(BaseExtractor):
             formatted_text=formatted_text,
             extraction_strategy="llm",
             strategy_details={"mode": "llm_dynamic", "source_url": source_url},
-        )
+        ))
 
     def extract_batch(
         self,
@@ -380,11 +407,11 @@ class LLMExtractor(BaseExtractor):
         source_url: str = "",
         selected_fields: list[str] | None = None,
     ) -> DynamicExtractResult:
-        return build_dynamic_fallback_result(
+        return normalize_dynamic_result(build_dynamic_fallback_result(
             text,
             source_url=source_url,
             selected_fields=selected_fields,
-        )
+        ))
 
     def _run_rule_precheck(
         self,
@@ -436,7 +463,7 @@ class LLMExtractor(BaseExtractor):
         page_type: str,
         selected_fields: list[str],
     ) -> bool:
-        if page_type in {"product", "job"}:
+        if page_type in {"product", "job", "pricing", "notice", "news", "policy"}:
             return True
 
         if not selected_fields:
@@ -453,6 +480,13 @@ class LLMExtractor(BaseExtractor):
             "author",
             "salary_range",
             "stock",
+            "availability",
+            "plan",
+            "billing_period",
+            "agency",
+            "organization",
+            "policy_number",
+            "content",
         }
         requested = set(selected_fields)
         return requested.issubset(structured_fields)
@@ -483,6 +517,10 @@ class LLMExtractor(BaseExtractor):
             return bool(has_name and values.get("price"))
         if page_type == "job":
             return bool(values.get("title") and values.get("company"))
+        if page_type == "pricing":
+            return bool(values.get("price") and (values.get("plan") or values.get("title")))
+        if page_type in {"notice", "news", "policy"}:
+            return bool(values.get("title") and (values.get("content") or values.get("summary")))
         return True
 
     @staticmethod

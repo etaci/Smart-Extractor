@@ -13,6 +13,7 @@ from smart_extractor.web.failure_diagnosis import build_task_failure_diagnosis
 from smart_extractor.web.management_helpers import (
     enrich_monitor_payload,
     notification_channels_from_profile,
+    summarize_task_validation,
 )
 from smart_extractor.web.task_models import MonitorRecord, TaskRecord
 
@@ -266,6 +267,7 @@ def build_task_detail_payload(
         "total_items": task.total_items,
         "completed_items": task.completed_items,
         "data": task.data,
+        "validation": summarize_task_validation(task.data),
         "error": task.error,
         "failure_diagnosis": build_task_failure_diagnosis(task.to_dict(), task.data),
         "domain": extract_domain(task.url),

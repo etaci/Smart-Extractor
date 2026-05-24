@@ -250,6 +250,14 @@
           <pre id="task-error-text">{{ task.error or "" }}</pre>
         </article>
 
+        <article id="task-validation-box" class="message-box secondary-box detail-validation-panel" hidden>
+          <div class="message-box-header">
+            <h3>质量校验</h3>
+            <span id="task-validation-status" class="badge badge-pending">-</span>
+          </div>
+          <div id="task-validation-summary" class="validation-summary"></div>
+        </article>
+
         <article id="task-auth-box" class="message-box secondary-box task-auth-box detail-auth-panel" hidden>
           <h3>详情页提示</h3>
           <p id="task-auth-text" class="plain-note">详情页需要有效的 API Token 才能持续刷新。</p>

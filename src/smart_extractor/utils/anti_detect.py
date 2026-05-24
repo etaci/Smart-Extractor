@@ -25,6 +25,12 @@ _USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
 ]
 
+_MOBILE_USER_AGENTS = [
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+]
+
 ANTI_BOT_TEXT_MARKERS = (
     "安全验证",
     "人机验证",
@@ -89,6 +95,7 @@ class AccessAttempt:
     profile_dir: str = ""
     storage_state_path: str = ""
     reason: str = ""
+    mobile_user_agent: bool = False
 
     @property
     def masked_proxy_url(self) -> str:
@@ -105,9 +112,10 @@ class ChallengeAssessment:
     reason: str = ""
 
 
-def get_random_user_agent() -> str:
-    """Randomly select a desktop browser user agent."""
-    return random.choice(_USER_AGENTS)  # nosec B311
+def get_random_user_agent(*, mobile: bool = False) -> str:
+    """Randomly select a realistic browser user agent."""
+    candidates = _MOBILE_USER_AGENTS if mobile else _USER_AGENTS
+    return random.choice(candidates)  # nosec B311
 
 
 def random_delay(min_seconds: float = 1.0, max_seconds: float = 3.0) -> None:
@@ -263,7 +271,14 @@ def build_access_attempts(
     attempts: list[AccessAttempt] = []
     seen: set[tuple[object, ...]] = set()
 
-    def add_attempt(attempt_no: int, fetcher_mode: str, proxy_url: str, reason: str) -> None:
+    def add_attempt(
+        attempt_no: int,
+        fetcher_mode: str,
+        proxy_url: str,
+        reason: str,
+        *,
+        mobile_user_agent: bool = False,
+    ) -> None:
         normalized_mode = str(fetcher_mode or "dynamic").strip().lower() or "dynamic"
         session_slot = (attempt_no - 1) % session_pool_size
         profile_slot = (attempt_no - 1) % profile_pool_size
@@ -282,6 +297,7 @@ def build_access_attempts(
             str(proxy_url or "").strip(),
             session_slot if normalized_mode == "dynamic" else 0,
             profile_slot if normalized_mode == "dynamic" else 0,
+            bool(mobile_user_agent),
         )
         if key in seen:
             return
@@ -296,6 +312,7 @@ def build_access_attempts(
                 profile_dir=profile_dir,
                 storage_state_path=storage_state_path,
                 reason=reason,
+                mobile_user_agent=mobile_user_agent,
             )
         )
 
@@ -306,6 +323,20 @@ def build_access_attempts(
         else:
             proxy_url = proxy_candidates[0]
         add_attempt(attempt_no, primary_mode, proxy_url, "primary")
+
+    if prefer_dynamic:
+        fallback_no = len(attempts) + 1
+        for proxy_url in proxy_candidates:
+            add_attempt(
+                fallback_no,
+                "dynamic",
+                proxy_url,
+                "mobile_ua_fallback",
+                mobile_user_agent=True,
+            )
+            fallback_no += 1
+            if fallback_no > max_attempts + max(len(proxy_candidates), 2):
+                break
 
     if prefer_dynamic and bool(getattr(config, "challenge_fallback_to_static", True)):
         fallback_no = len(attempts) + 1

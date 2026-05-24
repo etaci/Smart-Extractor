@@ -48,11 +48,13 @@ class StaticFetcher(BaseFetcher):
         return client
 
     def _build_headers(self) -> dict[str, str]:
-        return {
-            "User-Agent": self._config.user_agent or get_random_user_agent(),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate",
+        user_agent = self._config.user_agent or get_random_user_agent()
+        chrome_like = "Chrome/" in user_agent or "Edg/" in user_agent
+        headers = {
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": f"{self._config.locale},{self._config.locale.split('-')[0]};q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
             "Sec-Fetch-Dest": "document",
@@ -60,7 +62,17 @@ class StaticFetcher(BaseFetcher):
             "Sec-Fetch-Site": "none",
             "Sec-Fetch-User": "?1",
             "Upgrade-Insecure-Requests": "1",
+            "DNT": "1",
         }
+        if chrome_like:
+            headers.update(
+                {
+                    "sec-ch-ua": '"Chromium";v="131", "Google Chrome";v="131", "Not_A Brand";v="24"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                }
+            )
+        return headers
 
     def _should_escalate_to_dynamic(self, result: FetchResult | None) -> bool:
         if not bool(getattr(self._config, "static_fallback_to_dynamic", True)):
@@ -69,7 +81,7 @@ class StaticFetcher(BaseFetcher):
             return True
         if result.is_shell_page:
             return True
-        if not result.is_success:
+        if result.status_code == 0 and result.error:
             return True
         return result.status_code in {401, 403, 429}
 
@@ -92,6 +104,12 @@ class StaticFetcher(BaseFetcher):
             result = fetcher.fetch(url)
             if previous is not None:
                 result.retry_count += previous.retry_count + 1
+                result.headers = {
+                    **(result.headers or {}),
+                    "x-smart-static-html-length": str(len(previous.html or "")),
+                    "x-smart-dynamic-html-length": str(len(result.html or "")),
+                    "x-smart-fetch-rescue": "static_to_dynamic",
+                }
             return result
         except Exception as exc:
             logger.warning("StaticFetcher Playwright fallback failed: {}", exc)
@@ -119,6 +137,12 @@ class StaticFetcher(BaseFetcher):
                 response = client.get(url, headers=self._build_headers())
                 html = response.text
                 headers = dict(response.headers)
+                headers.update(
+                    {
+                        "x-smart-fetch-attempt-reason": attempt.reason,
+                        "x-smart-fetch-html-length": str(len(html or "")),
+                    }
+                )
                 assessment = assess_challenge(
                     text=html[:4000],
                     headers=headers,

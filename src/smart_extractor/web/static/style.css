@@ -1785,6 +1785,15 @@ textarea {
   line-height: 1.45;
 }
 
+.validation-badge {
+  display: inline-flex;
+  margin-top: 6px;
+}
+
+.validation-meta {
+  max-width: 180px;
+}
+
 .task-status-button {
   border: 0;
   cursor: pointer;
@@ -1813,6 +1822,43 @@ textarea {
 
 .template-score-table .panel-note {
   margin-top: 6px;
+}
+
+.detail-validation-panel {
+  border-color: color-mix(in srgb, var(--warning) 18%, var(--border));
+}
+
+.validation-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.validation-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.validation-metrics span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  padding: 5px 10px;
+}
+
+.validation-block {
+  border-left: 3px solid color-mix(in srgb, var(--warning) 60%, var(--border));
+  padding-left: 12px;
+}
+
+.validation-block p,
+.validation-block ul {
+  margin: 6px 0 0;
+}
+
+.validation-block ul {
+  padding-left: 18px;
 }
 
 .diagnosis-open {

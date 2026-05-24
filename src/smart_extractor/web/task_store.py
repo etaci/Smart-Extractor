@@ -35,6 +35,110 @@ from smart_extractor.web.task_models import (
     TemplateRecord,
     WorkerNodeRecord,
 )
+
+
+_FETCH_FAILURE_MARKERS = (
+    "404",
+    "401",
+    "403",
+    "429",
+    "anti_bot",
+    "anti bot",
+    "blocked",
+    "captcha",
+    "challenge",
+    "timeout",
+    "timed out",
+    "network",
+    "connection",
+    "shell",
+    "fetch",
+)
+
+
+def _classify_task_result_bucket(*, status: str, error: str, data_json: str) -> str:
+    normalized_status = str(status or "").strip().lower()
+    payload: dict[str, Any] = {}
+    if data_json:
+        try:
+            parsed = json.loads(data_json)
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {}
+
+    validation = payload.get("_validation") if isinstance(payload.get("_validation"), dict) else {}
+    validation_status = str(validation.get("status") or "").strip().lower()
+    if normalized_status == "success":
+        if validation_status == "partial_success":
+            return "partial_success"
+        if validation_status in {"failed", "validation_failed"}:
+            return "validation_failed"
+        return "full_success"
+
+    diagnostic_text = " ".join(
+        str(part or "")
+        for part in (
+            error,
+            payload.get("error"),
+            payload.get("failure_category"),
+            validation_status,
+            " ".join(str(item) for item in validation.get("errors", []) or []),
+        )
+    ).lower()
+    if any(marker in diagnostic_text for marker in _FETCH_FAILURE_MARKERS):
+        return "fetch_failed"
+    if validation_status in {"failed", "validation_failed"} or "validation" in diagnostic_text:
+        return "validation_failed"
+    return "failed"
+
+
+def _extract_template_runtime_diagnostics(data_json: str) -> dict[str, int | str]:
+    try:
+        parsed = json.loads(data_json) if data_json else {}
+    except Exception:
+        return {"template_id": ""}
+    if not isinstance(parsed, dict):
+        return {"template_id": ""}
+    context = (
+        parsed.get("_execution_context")
+        if isinstance(parsed.get("_execution_context"), dict)
+        else {}
+    )
+    template_id = str(context.get("template_id") or "").strip()
+    if not template_id:
+        return {"template_id": ""}
+    strategy_details = (
+        parsed.get("strategy_details")
+        if isinstance(parsed.get("strategy_details"), dict)
+        else {}
+    )
+    runtime = (
+        parsed.get("_runtime_metrics")
+        if isinstance(parsed.get("_runtime_metrics"), dict)
+        else {}
+    )
+    source_fields = (
+        strategy_details.get("source_fields")
+        if isinstance(strategy_details.get("source_fields"), dict)
+        else {}
+    )
+    return {
+        "template_id": template_id,
+        "structured_hit_count": 1 if source_fields else 0,
+        "normalized_count": 1 if strategy_details.get("normalization_version") else 0,
+        "specialized_rule_count": (
+            1 if str(parsed.get("extraction_strategy") or "") == "specialized_rule" else 0
+        ),
+        "json_response_count": int(runtime.get("fetch_json_response_count", 0) or 0),
+        "mobile_fallback_count": 1 if bool(runtime.get("mobile_ua_fallback")) else 0,
+        "html_compare_count": (
+            1
+            if int(runtime.get("static_html_length", 0) or 0) > 0
+            and int(runtime.get("dynamic_html_length", 0) or 0) > 0
+            else 0
+        ),
+    }
 from smart_extractor.web.task_store_runtime import (
     build_failed_fields,
     build_parent_refresh_fields,
@@ -2177,6 +2281,14 @@ class SQLiteTaskStore:
                 """,
                 (normalized_tenant_id, today),
             ).fetchall()
+            task_rows = conn.execute(
+                """
+                SELECT task_id, status, error, data_json
+                FROM web_tasks
+                WHERE tenant_id=? AND substr(created_at, 1, 10)=?
+                """,
+                (normalized_tenant_id, today),
+            ).fetchall()
             failure_rows = conn.execute(
                 """
                 SELECT failure_category, COUNT(*) AS count
@@ -2203,6 +2315,25 @@ class SQLiteTaskStore:
             }
             for row in failure_rows
         ]
+        result_counts = {
+            "full_success": 0,
+            "partial_success": 0,
+            "fetch_failed": 0,
+            "validation_failed": 0,
+            "failed": 0,
+        }
+        for row in task_rows:
+            bucket = _classify_task_result_bucket(
+                status=str(row["status"] or ""),
+                error=str(row["error"] or ""),
+                data_json=str(row["data_json"] or ""),
+            )
+            result_counts[bucket] = result_counts.get(bucket, 0) + 1
+        result_breakdown = [
+            {"category": category, "count": count}
+            for category, count in result_counts.items()
+            if count > 0
+        ]
         return {
             "tenant_id": normalized_tenant_id,
             "date": today,
@@ -2210,6 +2341,7 @@ class SQLiteTaskStore:
             "today_success_rate": success_rate,
             "today_success_rate_label": f"{success_rate * 100:.1f}%",
             "failure_breakdown": failure_breakdown,
+            "result_breakdown": result_breakdown,
             "token_cost": {
                 "total_tokens": int(usage["totals"].get("total_tokens") or 0),
                 "today_tokens": int(today_usage.get("total_tokens") or 0),
@@ -2241,7 +2373,10 @@ class SQLiteTaskStore:
                 SELECT template_id,
                     COUNT(*) AS total_count,
                     SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) AS success_count,
-                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_count
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_count,
+                    SUM(field_count) AS field_count,
+                    SUM(filled_field_count) AS filled_field_count,
+                    SUM(empty_field_count) AS empty_field_count
                 FROM task_operational_metrics
                 WHERE tenant_id=? AND template_id!=''
                 GROUP BY template_id
@@ -2266,12 +2401,25 @@ class SQLiteTaskStore:
                 """,
                 (normalized_tenant_id,),
             ).fetchall()
+            diagnostic_rows = conn.execute(
+                """
+                SELECT data_json
+                FROM web_tasks
+                WHERE tenant_id=? AND data_json!=''
+                ORDER BY created_at DESC, id DESC
+                LIMIT 500
+                """,
+                (normalized_tenant_id,),
+            ).fetchall()
 
         metrics_by_template = {
             str(row["template_id"] or ""): {
                 "total_count": int(row["total_count"] or 0),
                 "success_count": int(row["success_count"] or 0),
                 "failed_count": int(row["failed_count"] or 0),
+                "field_count": int(row["field_count"] or 0),
+                "filled_field_count": int(row["filled_field_count"] or 0),
+                "empty_field_count": int(row["empty_field_count"] or 0),
             }
             for row in metric_rows
         }
@@ -2286,14 +2434,38 @@ class SQLiteTaskStore:
             summary[status if status in summary else "unknown"] += int(row["count"] or 0)
 
         recent_failure_by_template: dict[str, dict[str, Any]] = {}
+        failure_trend_by_template: dict[str, dict[str, int]] = {}
         for row in failure_rows:
             template_id = str(row["template_id"] or "")
+            category = str(row["failure_category"] or "unknown")
+            trend = failure_trend_by_template.setdefault(template_id, {})
+            trend[category] = int(trend.get(category, 0)) + 1
             if template_id in recent_failure_by_template:
                 continue
             recent_failure_by_template[template_id] = {
-                "category": str(row["failure_category"] or "unknown"),
+                "category": category,
                 "at": str(row["updated_at"] or ""),
             }
+
+        diagnostics_by_template: dict[str, dict[str, int]] = {}
+        for row in diagnostic_rows:
+            diagnostics = _extract_template_runtime_diagnostics(str(row["data_json"] or ""))
+            template_id = diagnostics.pop("template_id", "")
+            if not template_id:
+                continue
+            summary = diagnostics_by_template.setdefault(
+                template_id,
+                {
+                    "structured_hit_count": 0,
+                    "normalized_count": 0,
+                    "specialized_rule_count": 0,
+                    "json_response_count": 0,
+                    "mobile_fallback_count": 0,
+                    "html_compare_count": 0,
+                },
+            )
+            for key, value in diagnostics.items():
+                summary[key] = int(summary.get(key, 0)) + int(value or 0)
 
         template_ids = {
             str(row["template_id"] or "").strip()
@@ -2311,7 +2483,14 @@ class SQLiteTaskStore:
         for template_id in sorted(template_ids):
             metric = metrics_by_template.get(
                 template_id,
-                {"total_count": 0, "success_count": 0, "failed_count": 0},
+                {
+                    "total_count": 0,
+                    "success_count": 0,
+                    "failed_count": 0,
+                    "field_count": 0,
+                    "filled_field_count": 0,
+                    "empty_field_count": 0,
+                },
             )
             feedback = feedback_by_template.get(
                 template_id,
@@ -2319,6 +2498,7 @@ class SQLiteTaskStore:
             )
             feedback_total = sum(int(value or 0) for value in feedback.values())
             success_rate = metric["success_count"] / max(metric["total_count"], 1)
+            field_hit_rate = metric["filled_field_count"] / max(metric["field_count"], 1)
             field_correct_rate = feedback["correct"] / max(feedback_total, 1)
             field_missing_rate = feedback["missing"] / max(feedback_total, 1)
             quality_score = round(
@@ -2335,10 +2515,26 @@ class SQLiteTaskStore:
                     "success_count": metric["success_count"],
                     "failed_count": metric["failed_count"],
                     "total_count": metric["total_count"],
+                    "field_count": metric["field_count"],
+                    "filled_field_count": metric["filled_field_count"],
+                    "empty_field_count": metric["empty_field_count"],
+                    "field_hit_rate": round(field_hit_rate, 4),
                     "field_correct_rate": round(field_correct_rate, 4),
                     "field_missing_rate": round(field_missing_rate, 4),
                     "field_feedback_count": feedback_total,
                     "field_feedback": feedback,
+                    "failure_trend": failure_trend_by_template.get(template_id, {}),
+                    "runtime_diagnostics": diagnostics_by_template.get(
+                        template_id,
+                        {
+                            "structured_hit_count": 0,
+                            "normalized_count": 0,
+                            "specialized_rule_count": 0,
+                            "json_response_count": 0,
+                            "mobile_fallback_count": 0,
+                            "html_compare_count": 0,
+                        },
+                    ),
                     "recent_failure": recent_failure_by_template.get(
                         template_id,
                         {"category": "", "at": ""},
@@ -2618,14 +2814,28 @@ class SQLiteTaskStore:
         normalized = str(error or "").strip().lower()
         if not normalized:
             return ""
+        if "404" in normalized or "not found" in normalized:
+            return "not_found"
         if "timeout" in normalized:
             return "timeout"
         if "429" in normalized or "rate limit" in normalized:
             return "rate_limit"
         if "401" in normalized or "403" in normalized:
-            return "auth_or_blocked"
+            return "blocked"
+        if any(
+            marker in normalized
+            for marker in (
+                "verification",
+                "shell",
+                "empty page",
+                "loading page",
+                "anti bot",
+                "anti-bot",
+            )
+        ):
+            return "anti_bot_or_shell"
         if "challenge" in normalized or "captcha" in normalized or "验证" in normalized:
-            return "anti_bot"
+            return "anti_bot_or_shell"
         if "schema" in normalized or "quality" in normalized or "字段" in normalized:
             return "quality"
         if "network" in normalized or "connect" in normalized or "dns" in normalized:

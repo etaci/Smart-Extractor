@@ -96,6 +96,41 @@ def _looks_like_labeled_line(text: str) -> bool:
     return bool(re.match(r"^[^:：]{1,20}\s*[:：]\s*\S+", normalized))
 
 
+def _strip_markup(text: str) -> str:
+    return re.sub(r"^[#>*\-\u2022鈥?\s]+", "", _clean_line(text))
+
+
+def _is_noise_value(text: str) -> bool:
+    normalized = _strip_markup(text).lower()
+    if not normalized:
+        return True
+    noise_markers = (
+        "structured extraction hints",
+        "skip to",
+        "main content",
+        "cookie",
+        "privacy",
+        "javascript",
+        "enable javascript",
+        "menu",
+        "search",
+        "subscribe",
+        "sign in",
+        "log in",
+        "[... ",
+    )
+    return any(marker in normalized for marker in noise_markers)
+
+
+def _looks_like_price(text: str) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    if re.search(r"[$€£¥]|USD|EUR|GBP|CNY|RMB|/mo|/month|per month|/yr|/year", normalized, re.I):
+        return bool(re.search(r"\d", normalized))
+    return False
+
+
 class RuleBasedDynamicExtractor:
     """Simple heuristics that reuse learned field plans."""
 
@@ -114,7 +149,7 @@ class RuleBasedDynamicExtractor:
 
         for field in normalized_fields:
             value = self._extract_field(field, lines, text)
-            if value not in (None, "", [], {}):
+            if value not in (None, "", [], {}) and not _is_noise_value(str(value)):
                 data[field] = value
 
         title_like = self._pick_title(lines)
@@ -173,8 +208,20 @@ class RuleBasedDynamicExtractor:
         field_name = str(field or "").strip().lower()
         if not field_name:
             return ""
+        aliases = _FIELD_ALIASES.get(field_name, [])
+        labeled = self._extract_labeled_value(lines, aliases)
+        if labeled and field_name in {
+            "price",
+            "salary_range",
+            "publish_date",
+            "date",
+            "billing_period",
+            "availability",
+            "stock",
+        }:
+            return labeled
         if field_name == "price":
-            return self._extract_first_regex(_PRICE_RE, text) or self._extract_first_regex(_ASCII_PRICE_RE, text)
+            return self._extract_price(lines, text)
         if field_name == "salary_range":
             return self._extract_first_regex(_SALARY_RE, text)
         if field_name in {"publish_date", "date"}:
@@ -186,8 +233,6 @@ class RuleBasedDynamicExtractor:
         if field_name == "availability":
             return self._extract_availability(text)
 
-        aliases = _FIELD_ALIASES.get(field_name, [])
-        labeled = self._extract_labeled_value(lines, aliases)
         if labeled:
             return labeled
 
@@ -215,24 +260,55 @@ class RuleBasedDynamicExtractor:
             for pattern in patterns:
                 matched = pattern.search(line)
                 if matched:
-                    return _clean_line(matched.group(1))
+                    value = _clean_line(matched.group(1))
+                    if not _is_noise_value(value):
+                        return value
         return ""
+
+    @staticmethod
+    def _extract_price(lines: list[str], text: str) -> str:
+        labeled = RuleBasedDynamicExtractor._extract_labeled_value(
+            lines,
+            _FIELD_ALIASES.get("price", []),
+        )
+        if _looks_like_price(labeled):
+            return labeled
+        candidates = []
+        for pattern in (_ASCII_PRICE_RE, _PRICE_RE):
+            for matched in pattern.finditer(str(text or "")):
+                value = _clean_line(matched.group(1))
+                if _looks_like_price(value) and not _is_noise_value(value):
+                    candidates.append(value)
+        if not candidates:
+            return ""
+        # Prefer values with explicit currency symbols and decimal precision.
+        return sorted(
+            candidates,
+            key=lambda item: (
+                bool(re.search(r"[$€£¥]", item)),
+                bool(re.search(r"\d+\.\d{2}", item)),
+                -len(item),
+            ),
+            reverse=True,
+        )[0]
 
     @staticmethod
     def _extract_first_regex(pattern: re.Pattern[str], text: str) -> str:
         matched = pattern.search(str(text or ""))
         if not matched:
             return ""
-        return _clean_line(matched.group(1))
+        value = _clean_line(matched.group(1))
+        return "" if _is_noise_value(value) else value
 
     @staticmethod
     def _pick_title(lines: list[str]) -> str:
         for line in lines[:8]:
             if _looks_like_labeled_line(line) or RuleBasedDynamicExtractor._is_noise_heading(line):
                 continue
-            if 4 <= len(line) <= 80:
-                return line
-        return lines[0] if lines else ""
+            title = _strip_markup(line)
+            if 4 <= len(title) <= 80 and not _is_noise_value(title):
+                return title
+        return _strip_markup(lines[0]) if lines and not _is_noise_value(lines[0]) else ""
 
     @staticmethod
     def _is_noise_heading(line: str) -> bool:
@@ -240,6 +316,7 @@ class RuleBasedDynamicExtractor:
         if not normalized:
             return True
         noise_markers = (
+            "structured extraction hints",
             "skip to",
             "main content",
             "cookie",
@@ -314,7 +391,7 @@ class RuleBasedDynamicExtractor:
         if labeled:
             return labeled
         for line in lines[:12]:
-            if RuleBasedDynamicExtractor._is_noise_heading(line):
+            if RuleBasedDynamicExtractor._is_noise_heading(line) or _is_noise_value(line):
                 continue
             if 2 <= len(line) <= 80 and not _looks_like_labeled_line(line):
                 return line

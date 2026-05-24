@@ -17,6 +17,7 @@ class ValidationResult:
 
     def __init__(self):
         self.is_valid = True
+        self.status = "full_success"
         self.warnings: list[str] = []
         self.errors: list[str] = []
         self.completeness_score: float = 0.0
@@ -28,12 +29,14 @@ class ValidationResult:
     def add_error(self, msg: str) -> None:
         self.errors.append(msg)
         self.is_valid = False
+        self.status = "failed"
 
     @property
     def summary(self) -> str:
         status = "[PASS] 通过" if self.is_valid else "[FAIL] 未通过"
         parts = [
             f"验证状态: {status}",
+            f"结果级别: {self.status}",
             f"完整度: {self.completeness_score:.1%}",
             f"质量分: {self.quality_score:.1%}",
         ]
@@ -68,9 +71,14 @@ class DataValidator:
         result = ValidationResult()
         result.completeness_score = data.completeness_score()
 
-        if result.completeness_score < 0.3:
+        if isinstance(data, DynamicExtractResult) and self._has_any_dynamic_value(data):
+            if result.completeness_score < 0.5:
+                result.status = "partial_success"
+                result.add_warning(f"字段完整度较低 ({result.completeness_score:.1%})")
+        elif result.completeness_score < 0.3:
             result.add_error(f"数据完整度过低 ({result.completeness_score:.1%})")
         elif result.completeness_score < 0.5:
+            result.status = "partial_success"
             result.add_warning(f"数据完整度较低 ({result.completeness_score:.1%})")
 
         resolved_required = required_fields or self._resolve_required_fields(data)
@@ -80,6 +88,10 @@ class DataValidator:
 
         logger.info("数据验证完成: {}", result.summary)
         return result
+
+    @staticmethod
+    def _has_any_dynamic_value(data: DynamicExtractResult) -> bool:
+        return any(value not in (None, "", [], {}) for value in (data.data or {}).values())
 
     def _resolve_required_fields(self, data: BaseExtractModel) -> list[str]:
         if isinstance(data, DynamicExtractResult):
@@ -99,8 +111,13 @@ class DataValidator:
 
         if isinstance(data, DynamicExtractResult):
             payload = data.data
+            has_any_value = self._has_any_dynamic_value(data)
             for field_name in required_fields:
                 if payload.get(field_name) in (None, "", [], {}):
+                    if has_any_value:
+                        result.status = "partial_success"
+                        result.add_warning(f"关键字段 '{field_name}' 为空")
+                        continue
                     result.add_error(f"关键字段 '{field_name}' 为空")
             return
 

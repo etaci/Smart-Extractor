@@ -21,6 +21,9 @@ ENV/
 .pytest_cache/
 .coverage
 .coverage.*
+coverage.xml
+junit.xml
+pytest-report.xml
 htmlcov/
 .hypothesis/
 .tox/
@@ -76,6 +79,7 @@ output/
 screenshots/
 playwright-report/
 test-results/
+downloads/
 *.log
 *.pid
 *.seed
@@ -89,6 +93,8 @@ test-results/
 dump.rdb
 storage_state*.json
 *.trace.zip
+*.har
+*.webm
 
 # =========================
 # Local config and secrets

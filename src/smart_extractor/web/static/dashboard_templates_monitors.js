@@ -18,6 +18,8 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
 
   function formatExtractionStrategy(strategy) {
     const normalized = String(strategy || "").trim().toLowerCase();
+    if (normalized === "specialized_rule") return "专用抽取器";
+    if (normalized === "rule_precheck") return "规则预检";
     if (normalized === "rule") return "规则复用";
     if (normalized === "llm") return "LLM 学习";
     if (normalized === "fallback") return "回退抽取";
@@ -29,6 +31,28 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
   function pct(value) {
     const numeric = Number(value || 0);
     return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(1)}%` : "0%";
+  }
+
+  function runtimeDiagnosticSummary(diagnostics) {
+    const data = diagnostics && typeof diagnostics === "object" ? diagnostics : {};
+    const parts = [];
+    if (Number(data.structured_hit_count || 0) > 0) {
+      parts.push(`结构化命中 ${Number(data.structured_hit_count || 0)}`);
+    }
+    if (Number(data.normalized_count || 0) > 0) {
+      parts.push(`字段规范化 ${Number(data.normalized_count || 0)}`);
+    }
+    const fetchBits = [];
+    if (Number(data.json_response_count || 0) > 0) {
+      fetchBits.push(`JSON 响应 ${Number(data.json_response_count || 0)}`);
+    }
+    if (Number(data.mobile_fallback_count || 0) > 0) {
+      fetchBits.push(`移动端兜底 ${Number(data.mobile_fallback_count || 0)}`);
+    }
+    if (fetchBits.length) {
+      parts.push(`抓取诊断：${fetchBits.join("、")}`);
+    }
+    return parts.join(" · ");
   }
 
   function severityQueueClass(severity) {
@@ -56,11 +80,28 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
   function failureCategoryLabel(category) {
     const normalized = String(category || "").trim().toLowerCase();
     if (normalized === "403") return "403";
+    if (normalized === "blocked") return "403/401";
+    if (normalized === "not_found") return "404";
+    if (normalized === "rate_limit") return "限流";
+    if (normalized === "anti_bot_or_shell") return "反爬/空壳页";
     if (normalized === "captcha") return "验证码";
     if (normalized === "timeout") return "超时";
     if (normalized === "missing_fields") return "字段缺失";
     if (normalized === "model_error") return "模型异常";
     return normalized || "暂无失败";
+  }
+
+  function renderFailureTrend(trend) {
+    const entries = Object.entries(trend || {})
+      .filter(([, count]) => Number(count || 0) > 0)
+      .sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0))
+      .slice(0, 3);
+    if (!entries.length) {
+      return "暂无趋势";
+    }
+    return entries
+      .map(([category, count]) => `${failureCategoryLabel(category)} ${Number(count || 0)}`)
+      .join(" / ");
   }
 
   function renderOperationalAlertQueue(alerts) {
@@ -114,9 +155,11 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
             <tr>
               <th>模板</th>
               <th>成功率</th>
+              <th>字段命中</th>
               <th>字段正确率</th>
               <th>字段缺失率</th>
               <th>最近失败原因</th>
+              <th>失败趋势</th>
               <th>质量分</th>
             </tr>
           </thead>
@@ -124,6 +167,7 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
             ${items
               .map((item) => {
                 const failure = item.recent_failure || {};
+                const runtimeSummary = runtimeDiagnosticSummary(item.runtime_diagnostics);
                 return `
                   <tr>
                     <td>
@@ -131,10 +175,13 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
                       <p class="panel-note">${escHtml(joinParts([
                         item.template_id || "",
                         `样本 ${Number(item.total_count || 0)}`,
+                        `命中 ${Number(item.filled_field_count || 0)}/${Number(item.field_count || 0)}`,
                         `字段反馈 ${Number(item.field_feedback_count || 0)}`,
                       ]))}</p>
+                      ${runtimeSummary ? `<p class="panel-note">${escHtml(runtimeSummary)}</p>` : ""}
                     </td>
                     <td>${pct(item.success_rate)}</td>
+                    <td>${pct(item.field_hit_rate)}</td>
                     <td>${pct(item.field_correct_rate)}</td>
                     <td>${pct(item.field_missing_rate)}</td>
                     <td>${escHtml(
@@ -145,6 +192,7 @@ window.SmartExtractorDashboardAssets = function createDashboardAssets(deps) {
                           ])
                         : "暂无失败"
                     )}</td>
+                    <td>${escHtml(renderFailureTrend(item.failure_trend || {}))}</td>
                     <td><span class="badge ${Number(item.quality_score || 0) >= 0.8 ? "badge-success" : "badge-running"}">${pct(item.quality_score)}</span></td>
                   </tr>
                 `;

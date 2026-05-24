@@ -9,7 +9,7 @@ from typing import List, Optional
 from pydantic import Field
 
 from smart_extractor.validator.data_validator import DataValidator, ValidationResult
-from smart_extractor.models.base import BaseExtractModel
+from smart_extractor.models.base import BaseExtractModel, DynamicExtractResult
 
 
 class RichModel(BaseExtractModel):
@@ -88,6 +88,18 @@ class TestDataValidator:
         data = RichModel(title="标题", content="内容")
         result = self.validator.validate(data)
         assert 0.2 < result.completeness_score < 0.8
+
+    def test_dynamic_partial_data_is_not_failed(self):
+        data = DynamicExtractResult(
+            page_type="product",
+            selected_fields=["name", "price", "brand"],
+            candidate_fields=["name", "price", "brand"],
+            data={"name": "Phone", "price": "", "brand": ""},
+        )
+        result = self.validator.validate(data)
+        assert result.is_valid is True
+        assert result.status == "partial_success"
+        assert any("完整度" in warning or "关键字段" in warning for warning in result.warnings)
 
     def test_required_fields_check(self):
         """测试必填字段校验"""
