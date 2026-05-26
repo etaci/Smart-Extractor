@@ -16,6 +16,7 @@ from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_
 from smart_extractor.config import FetcherConfig
 from smart_extractor.fetcher.base import BaseFetcher, FetchResult
 from smart_extractor.fetcher.static import StaticFetcher
+from smart_extractor.fetcher.url_preflight import preflight_url
 from smart_extractor.utils.anti_detect import (
     AccessAttempt,
     ChallengeAssessment,
@@ -330,6 +331,30 @@ class PlaywrightFetcher(BaseFetcher):
             status_code=status_code,
         )
 
+    def _maybe_early_stop_challenge(
+        self,
+        page: Page,
+        *,
+        status_code: int,
+        headers: dict[str, str] | None,
+    ) -> ChallengeAssessment | None:
+        if status_code not in {401, 403, 429} and not headers_indicate_challenge(headers):
+            return None
+        wait_ms = max(0, min(int(getattr(self._config, "challenge_early_stop_ms", 1200) or 0), 5000))
+        if wait_ms:
+            try:
+                page.wait_for_timeout(wait_ms)
+            except Exception:
+                pass
+        assessment = self._assess_page(
+            page,
+            status_code=status_code,
+            headers=headers,
+        )
+        if assessment.blocked or assessment.challenge:
+            return assessment
+        return None
+
     def _launch_attempt_context(
         self,
         attempt: AccessAttempt,
@@ -456,6 +481,31 @@ class PlaywrightFetcher(BaseFetcher):
             )
             status_code = response.status if response else 0
             headers = dict(response.headers) if response else {}
+            if bool(getattr(self._config, "challenge_early_stop_enabled", True)):
+                early_assessment = self._maybe_early_stop_challenge(
+                    page,
+                    status_code=status_code,
+                    headers=headers,
+                )
+                if early_assessment is not None:
+                    html = page.content()
+                    headers = {
+                        **headers,
+                        "x-smart-fetch-attempt-reason": attempt.reason,
+                        "x-smart-fetch-mobile-ua": "1" if attempt.mobile_user_agent else "0",
+                        "x-smart-fetch-json-responses": str(len(captured_json)),
+                        "x-smart-fetch-html-length": str(len(html or "")),
+                        "x-smart-fetch-early-stop": early_assessment.reason or "challenge",
+                    }
+                    return FetchResult(
+                        url=url,
+                        html=html,
+                        status_code=status_code,
+                        headers=headers,
+                        elapsed_ms=(time.perf_counter() - overall_start) * 1000,
+                        is_shell_page=True,
+                        retry_count=retry_count_offset,
+                    ), early_assessment
             try:
                 page.wait_for_load_state("networkidle", timeout=min(self._config.timeout, 5000))
             except Exception:
@@ -573,6 +623,34 @@ class PlaywrightFetcher(BaseFetcher):
 
     def fetch(self, url: str) -> FetchResult:
         overall_start = time.perf_counter()
+        preflight_headers: dict[str, str] = {}
+        if bool(getattr(self._config, "url_preflight_enabled", True)):
+            preflight = preflight_url(
+                url,
+                timeout_ms=int(getattr(self._config, "url_preflight_timeout_ms", 5000) or 5000),
+                headers=dict(_DEFAULT_HEADERS),
+                verify_ssl=bool(self._config.verify_ssl),
+            )
+            preflight_headers = {
+                "x-smart-url-preflight": "ok" if preflight.reachable else "unreachable",
+                "x-smart-url-preflight-reason": preflight.reason,
+                "x-smart-final-url": preflight.final_url,
+                "x-smart-canonical-url": preflight.canonical_url,
+            }
+            if (
+                not preflight.reachable
+                and bool(getattr(self._config, "url_preflight_abort_unreachable", True))
+            ):
+                return FetchResult(
+                    url=url,
+                    status_code=preflight.status_code,
+                    headers={**preflight.headers, **preflight_headers},
+                    error=f"unreachable_url: {preflight.reason}",
+                    elapsed_ms=(time.perf_counter() - overall_start) * 1000,
+                )
+            if preflight.target_url and preflight.target_url != url:
+                logger.info("PlaywrightFetcher URL preflight resolved: {} -> {}", url, preflight.target_url)
+                url = preflight.target_url
         attempts = build_access_attempts(url, self._config, prefer_dynamic=True)
         last_result: FetchResult | None = None
 
@@ -600,6 +678,8 @@ class PlaywrightFetcher(BaseFetcher):
                     overall_start=overall_start,
                 )
             last_result = result
+            if preflight_headers:
+                result.headers = {**(result.headers or {}), **preflight_headers}
             if not assessment.retryable or attempt_index >= len(attempts):
                 return result
             logger.warning(

@@ -128,6 +128,11 @@ class LLMConfig(BaseSettings):
     )
 
 
+    specialized_rule_min_completeness: float = Field(
+        default=0.75,
+        description="Specialized rule results below this completeness continue to LLM completion",
+    )
+
     cost_input_per_million: float = Field(
         default=0.0,
         description="Optional input-token price override in USD per 1M tokens",
@@ -194,6 +199,26 @@ class FetcherConfig(BaseSettings):
     static_fallback_to_dynamic: bool = Field(
         default=True,
         description="Escalate static fetch failures or shell pages to Playwright",
+    )
+    url_preflight_enabled: bool = Field(
+        default=True,
+        description="Run a lightweight URL health check before expensive fetches",
+    )
+    url_preflight_timeout_ms: int = Field(
+        default=5000,
+        description="URL preflight timeout in milliseconds",
+    )
+    url_preflight_abort_unreachable: bool = Field(
+        default=True,
+        description="Return unreachable 404/DNS/invalid URL as fetch-layer failures",
+    )
+    challenge_early_stop_enabled: bool = Field(
+        default=True,
+        description="Stop challenge-page attempts early instead of waiting for full timeout",
+    )
+    challenge_early_stop_ms: int = Field(
+        default=1200,
+        description="Short body-read wait before challenge early stop",
     )
 
 

@@ -121,7 +121,17 @@ class LLMExtractor(BaseExtractor):
         )
         if specialized_result is not None:
             logger.info("专用抽取器命中，跳过 LLM 调用: {}", source_url)
-            return specialized_result
+            specialized_completeness = specialized_result.completeness_score()
+            min_completeness = float(
+                getattr(self._config, "specialized_rule_min_completeness", 0.75) or 0.75
+            )
+            if specialized_completeness >= min_completeness:
+                return specialized_result
+            logger.info(
+                "专用抽取器结果完整度较低，继续调用 LLM 补齐: url={} completeness={:.2f}",
+                source_url,
+                specialized_completeness,
+            )
 
         precheck_result = self._run_rule_precheck(
             text=text,
@@ -142,6 +152,22 @@ class LLMExtractor(BaseExtractor):
             source_url=source_url,
             text=self._truncate_text(text),
         )
+        if specialized_result is not None:
+            prompt = (
+                "Rule extraction hints from specialized extractor:\n"
+                + json.dumps(
+                    {
+                        "page_type": specialized_result.page_type,
+                        "selected_fields": specialized_result.selected_fields,
+                        "data": specialized_result.data,
+                        "completeness": specialized_result.completeness_score(),
+                        "strategy_details": specialized_result.strategy_details,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\nUse these as high-confidence hints, then fill missing requested fields from the page text.\n\n"
+                + prompt
+            )
         prompt = f"{_SPECIALIZED_DYNAMIC_GUIDE}\n\n{prompt}"
 
         payload: dict[str, Any] | None = None
@@ -168,6 +194,17 @@ class LLMExtractor(BaseExtractor):
         )
         if need_fallback:
             logger.info("模型输出无效或被拦截，启用规则抽取兜底")
+            if specialized_result is not None:
+                specialized_result.strategy_details = {
+                    **(
+                        specialized_result.strategy_details
+                        if isinstance(specialized_result.strategy_details, dict)
+                        else {}
+                    ),
+                    "llm_completion_attempted": True,
+                    "llm_completion_fallback": True,
+                }
+                return specialized_result
             return self._build_fallback_result(
                 text,
                 source_url=source_url,
@@ -238,7 +275,18 @@ class LLMExtractor(BaseExtractor):
             data=filtered_data,
             formatted_text=formatted_text,
             extraction_strategy="llm",
-            strategy_details={"mode": "llm_dynamic", "source_url": source_url},
+            strategy_details={
+                "mode": "llm_dynamic",
+                "source_url": source_url,
+                **(
+                    {
+                        "rule_hint_strategy": specialized_result.extraction_strategy,
+                        "rule_hint_completeness": specialized_result.completeness_score(),
+                    }
+                    if specialized_result is not None
+                    else {}
+                ),
+            },
         ))
 
     def extract_batch(

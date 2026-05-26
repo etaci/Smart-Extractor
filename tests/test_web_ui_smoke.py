@@ -274,6 +274,7 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.evaluate("document.querySelector('[data-failure-diagnosis]')?.click()")
         page.wait_for_selector("#failure-diagnosis-dialog:not([hidden])")
         page.click("button[data-close-failure-diagnosis]")
+        page.select_option("#task-batch-filter", "batch-demo")
         page.click("#load-quality-btn")
         page.click("#load-cost-btn")
         page.click("#load-audit-btn")
@@ -331,6 +332,8 @@ def test_dashboard_and_detail_controls_smoke(web_ui_base_url):
         page.fill("#monitor-scenario-label", "Scenario")
         page.fill("#monitor-alert-focus", "price")
         page.fill("#monitor-business-goal", "goal")
+        page.select_option("#monitor-notify-on", "changed")
+        page.select_option("#monitor-summary-style", "ops")
         page.fill("#monitor-webhook-url", "https://example.com/hook")
         page.fill("#monitor-notification-channels", "webhook|main|https://example.com/hook|secret")
         page.check("#monitor-digest-enabled")
@@ -470,12 +473,24 @@ def test_dashboard_basic_config_controls_smoke(web_ui_base_url):
         page.fill("#api-token", "updated-token")
         page.locator("#api-token").blur()
         page.locator("summary").filter(has_text="基础配置").click()
-        page.click("#save-basic-config-btn")
+        page.fill("#basic-api-key", "sk-test")
+        page.fill("#basic-base-url", "https://example.test/v1")
+        page.fill("#basic-model", "test-model")
+        page.fill("#basic-temperature", "0.7")
+        with page.expect_request(lambda request: request.method == "POST" and request.url.endswith("/api/config/basic")) as save_request:
+            page.click("#save-basic-config-btn")
+        saved_payload = save_request.value.post_data_json
         page.click("#refresh-basic-config-btn", force=True)
         browser.close()
 
     assert any(call.startswith("GET /api/config/basic") for call in calls)
     assert any(call.startswith("POST /api/config/basic") for call in calls)
+    assert saved_payload == {
+        "api_key": "sk-test",
+        "base_url": "https://example.test/v1",
+        "model": "test-model",
+        "temperature": 0.7,
+    }
     assert page_errors == []
     assert console_errors == []
 

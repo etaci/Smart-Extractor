@@ -6,6 +6,7 @@ from smart_extractor.extractor.llm_extractor import (
     _extract_chat_message_content,
     _safe_json_loads,
 )
+from smart_extractor.models.base import DynamicExtractResult
 
 
 def test_extract_chat_message_content_from_standard_dict_response():
@@ -198,6 +199,97 @@ def test_extract_dynamic_uses_specialized_extractor_before_llm(monkeypatch):
     assert result.extraction_strategy == "specialized_rule"
     assert result.page_type == "pricing"
     assert result.data["price"] == "USD 49 per seat/month"
+
+
+def test_low_completeness_specialized_result_is_completed_by_llm(monkeypatch):
+    extractor = LLMExtractor(
+        LLMConfig(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test-model",
+            specialized_rule_min_completeness=0.75,
+        )
+    )
+    prompts = []
+
+    monkeypatch.setattr(
+        extractor._specialized_extractor,
+        "extract",
+        lambda **_: DynamicExtractResult(
+            page_type="product",
+            selected_fields=["name", "price", "availability", "brand"],
+            field_labels={"name": "Name", "price": "Price"},
+            data={"name": "Rule Widget"},
+            formatted_text="Name: Rule Widget",
+            extraction_strategy="specialized_rule",
+            strategy_details={"source_fields": ["json_ld"]},
+        ),
+    )
+    monkeypatch.setattr(extractor, "_run_rule_precheck", lambda **_: None)
+
+    def fake_call_json_llm(**kwargs):
+        prompts.append(kwargs["user_prompt"])
+        return {
+            "page_type": "product",
+            "selected_fields": ["name", "price", "availability", "brand"],
+            "data": {
+                "name": "Rule Widget",
+                "price": "USD 19.99",
+                "availability": "in_stock",
+                "brand": "Acme",
+            },
+        }
+
+    monkeypatch.setattr(extractor, "_call_json_llm", fake_call_json_llm)
+
+    result = extractor.extract_dynamic(
+        text="Product page with price USD 19.99, brand Acme, in stock.",
+        source_url="https://example.com/product",
+        selected_fields=["name", "price", "availability", "brand"],
+    )
+
+    assert result.extraction_strategy == "llm"
+    assert result.data["brand"] == "Acme"
+    assert result.strategy_details["rule_hint_strategy"] == "specialized_rule"
+    assert result.strategy_details["rule_hint_completeness"] == 0.25
+    assert "Rule extraction hints from specialized extractor" in prompts[0]
+
+
+def test_low_completeness_specialized_result_falls_back_when_llm_fails(monkeypatch):
+    extractor = LLMExtractor(
+        LLMConfig(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test-model",
+            specialized_rule_min_completeness=0.75,
+        )
+    )
+    monkeypatch.setattr(
+        extractor._specialized_extractor,
+        "extract",
+        lambda **_: DynamicExtractResult(
+            page_type="product",
+            selected_fields=["name", "price", "availability", "brand"],
+            data={"name": "Rule Widget"},
+            extraction_strategy="specialized_rule",
+        ),
+    )
+    monkeypatch.setattr(extractor, "_run_rule_precheck", lambda **_: None)
+    monkeypatch.setattr(
+        extractor,
+        "_call_json_llm",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("llm down")),
+    )
+
+    result = extractor.extract_dynamic(
+        text="Product page with partial data.",
+        source_url="https://example.com/product",
+        selected_fields=["name", "price", "availability", "brand"],
+    )
+
+    assert result.extraction_strategy == "specialized_rule"
+    assert result.strategy_details["llm_completion_attempted"] is True
+    assert result.strategy_details["llm_completion_fallback"] is True
 
 
 def test_extract_dynamic_fallback_uses_rule_fields_when_llm_unavailable(monkeypatch):

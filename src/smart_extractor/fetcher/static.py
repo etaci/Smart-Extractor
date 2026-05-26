@@ -10,6 +10,7 @@ from loguru import logger
 
 from smart_extractor.config import FetcherConfig
 from smart_extractor.fetcher.base import BaseFetcher, FetchResult
+from smart_extractor.fetcher.url_preflight import preflight_url
 from smart_extractor.utils.anti_detect import (
     assess_challenge,
     build_access_attempts,
@@ -121,6 +122,34 @@ class StaticFetcher(BaseFetcher):
 
     def fetch(self, url: str) -> FetchResult:
         overall_start = time.perf_counter()
+        preflight = None
+        if bool(getattr(self._config, "url_preflight_enabled", True)):
+            headers = self._build_headers()
+            preflight = preflight_url(
+                url,
+                timeout_ms=int(getattr(self._config, "url_preflight_timeout_ms", 5000) or 5000),
+                headers=headers,
+                verify_ssl=bool(self._config.verify_ssl),
+            )
+            if (
+                not preflight.reachable
+                and bool(getattr(self._config, "url_preflight_abort_unreachable", True))
+            ):
+                return FetchResult(
+                    url=url,
+                    status_code=preflight.status_code,
+                    headers={
+                        **preflight.headers,
+                        "x-smart-url-preflight": "unreachable",
+                        "x-smart-url-preflight-reason": preflight.reason,
+                        "x-smart-final-url": preflight.final_url,
+                    },
+                    error=f"unreachable_url: {preflight.reason}",
+                    elapsed_ms=(time.perf_counter() - overall_start) * 1000,
+                )
+            if preflight.target_url and preflight.target_url != url:
+                logger.info("StaticFetcher URL preflight resolved: {} -> {}", url, preflight.target_url)
+                url = preflight.target_url
         attempts = build_access_attempts(url, self._config, prefer_dynamic=False)
         last_result: FetchResult | None = None
 
@@ -139,6 +168,9 @@ class StaticFetcher(BaseFetcher):
                 headers = dict(response.headers)
                 headers.update(
                     {
+                        "x-smart-url-preflight": "ok" if preflight else "skipped",
+                        "x-smart-final-url": preflight.final_url if preflight else str(response.url),
+                        "x-smart-canonical-url": preflight.canonical_url if preflight else "",
                         "x-smart-fetch-attempt-reason": attempt.reason,
                         "x-smart-fetch-html-length": str(len(html or "")),
                     }

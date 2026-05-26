@@ -28,12 +28,13 @@ def build_structured_hints(html: str, selected_fields: list[str] | None = None) 
         return ""
 
     hints: dict[str, str] = {}
-    _merge_hints(hints, _extract_meta_hints(soup))
+    candidates: dict[str, list[str]] = {}
     for payload in _iter_json_ld_payloads(soup):
-        _merge_hints(hints, _extract_json_ld_hints(payload))
+        _merge_hints(hints, _extract_json_ld_hints(payload), candidates=candidates)
     for payload in _iter_hydration_payloads(soup):
-        _merge_hints(hints, _extract_hydration_hints(payload))
-    _merge_hints(hints, _extract_microdata_hints(soup))
+        _merge_hints(hints, _extract_hydration_hints(payload), candidates=candidates)
+    _merge_hints(hints, _extract_microdata_hints(soup), candidates=candidates)
+    _merge_hints(hints, _extract_meta_hints(soup), candidates=candidates)
 
     if fields:
         ordered_fields = fields + [field for field in hints if field not in fields]
@@ -46,17 +47,31 @@ def build_structured_hints(html: str, selected_fields: list[str] | None = None) 
         if not value:
             continue
         lines.append(f"{field}: {value}")
+    for field in ("price", "publish_date", "availability", "billing_period", "salary_range"):
+        values = candidates.get(field) or []
+        if len(values) > 1:
+            lines.append(f"{field}_candidates: {' | '.join(values[:5])}")
     if not lines:
         return ""
     return "Structured extraction hints:\n" + "\n".join(lines)
 
 
-def _merge_hints(target: dict[str, str], source: dict[str, str]) -> None:
+def _merge_hints(
+    target: dict[str, str],
+    source: dict[str, str],
+    *,
+    candidates: dict[str, list[str]] | None = None,
+) -> None:
     for key, value in source.items():
         normalized = _normalize_value(value)
-        if not normalized or key in target:
+        if not normalized:
             continue
-        target[key] = normalized
+        if candidates is not None:
+            bucket = candidates.setdefault(key, [])
+            if normalized not in bucket:
+                bucket.append(normalized)
+        if key not in target:
+            target[key] = normalized
 
 
 def _normalize_value(value: Any) -> str:

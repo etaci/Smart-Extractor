@@ -37,6 +37,35 @@ def test_structured_hints_extracts_product_json_ld():
     assert "summary: A precise extraction tool." in hints
 
 
+def test_structured_hints_prefers_structured_sources_and_keeps_candidates():
+    html = """
+    <html><head>
+      <meta property="product:price:amount" content="19.99">
+      <meta property="product:price:currency" content="USD">
+      <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Product",
+        "name": "Candidate Widget",
+        "offers": {
+          "@type": "Offer",
+          "price": "29.99",
+          "priceCurrency": "USD",
+          "availability": "https://schema.org/InStock"
+        }
+      }
+      </script>
+    </head><body></body></html>
+    """
+
+    hints = build_structured_hints(html, selected_fields=["name", "price", "availability"])
+
+    assert "price: USD 29.99" in hints
+    assert "price_candidates:" in hints
+    assert "USD 29.99" in hints
+    assert "USD 19.99" in hints
+
+
 def test_structured_hints_extracts_next_hydration_payload():
     html = """
     <html><head>

@@ -139,6 +139,31 @@ def _extract_template_runtime_diagnostics(data_json: str) -> dict[str, int | str
             else 0
         ),
     }
+
+
+def _extract_field_valid_score(data_json: str) -> float:
+    try:
+        parsed = json.loads(data_json) if data_json else {}
+    except Exception:
+        return -1.0
+    if not isinstance(parsed, dict):
+        return -1.0
+    validation = parsed.get("_validation") if isinstance(parsed.get("_validation"), dict) else {}
+    if validation:
+        score = validation.get("completeness_score")
+        if score not in (None, ""):
+            try:
+                return max(0.0, min(float(score), 1.0))
+            except Exception:
+                return -1.0
+    data = parsed.get("data") if isinstance(parsed.get("data"), dict) else parsed
+    selected = parsed.get("selected_fields") if isinstance(parsed.get("selected_fields"), list) else []
+    if not selected:
+        selected = [key for key in data.keys() if not str(key).startswith("_")]
+    if not selected:
+        return -1.0
+    filled = sum(1 for field in selected if data.get(field) not in (None, "", [], {}))
+    return filled / max(len(selected), 1)
 from smart_extractor.web.task_store_runtime import (
     build_failed_fields,
     build_parent_refresh_fields,
@@ -2322,6 +2347,7 @@ class SQLiteTaskStore:
             "validation_failed": 0,
             "failed": 0,
         }
+        field_valid_scores: list[float] = []
         for row in task_rows:
             bucket = _classify_task_result_bucket(
                 status=str(row["status"] or ""),
@@ -2329,17 +2355,40 @@ class SQLiteTaskStore:
                 data_json=str(row["data_json"] or ""),
             )
             result_counts[bucket] = result_counts.get(bucket, 0) + 1
+            score = _extract_field_valid_score(str(row["data_json"] or ""))
+            if score >= 0:
+                field_valid_scores.append(score)
         result_breakdown = [
             {"category": category, "count": count}
             for category, count in result_counts.items()
             if count > 0
         ]
+        fetch_success_rate = round(
+            (today_total - int(result_counts.get("fetch_failed", 0))) / max(today_total, 1),
+            4,
+        )
+        fetched_total = max(today_total - int(result_counts.get("fetch_failed", 0)), 0)
+        extraction_success_rate = round(
+            (
+                int(result_counts.get("full_success", 0))
+                + int(result_counts.get("partial_success", 0))
+            )
+            / max(fetched_total, 1),
+            4,
+        )
+        field_valid_rate = round(
+            sum(field_valid_scores) / max(len(field_valid_scores), 1),
+            4,
+        )
         return {
             "tenant_id": normalized_tenant_id,
             "date": today,
             "today_tasks": int(today_usage.get("tasks_created") or today_total or 0),
             "today_success_rate": success_rate,
             "today_success_rate_label": f"{success_rate * 100:.1f}%",
+            "fetch_success_rate": fetch_success_rate,
+            "extraction_success_rate_on_fetched_pages": extraction_success_rate,
+            "field_valid_rate_on_success": field_valid_rate,
             "failure_breakdown": failure_breakdown,
             "result_breakdown": result_breakdown,
             "token_cost": {
@@ -2814,6 +2863,8 @@ class SQLiteTaskStore:
         normalized = str(error or "").strip().lower()
         if not normalized:
             return ""
+        if "unreachable_url" in normalized or "invalid_url" in normalized:
+            return "unreachable"
         if "404" in normalized or "not found" in normalized:
             return "not_found"
         if "timeout" in normalized:

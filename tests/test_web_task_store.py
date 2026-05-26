@@ -2,6 +2,8 @@
 Web 任务持久化存储测试。
 """
 
+from datetime import date, timedelta
+
 import pytest
 from fastapi import HTTPException
 
@@ -134,6 +136,41 @@ def test_operational_overview_breaks_down_result_statuses(tmp_path):
     assert breakdown["partial_success"] == 1
     assert breakdown["fetch_failed"] == 1
     assert breakdown["validation_failed"] == 1
+    assert overview["fetch_success_rate"] == 0.75
+    assert overview["extraction_success_rate_on_fetched_pages"] == 0.6667
+
+
+def test_operational_overview_reports_field_valid_rate_on_success(tmp_path):
+    db_path = tmp_path / "web_tasks.db"
+    store = SQLiteTaskStore(db_path)
+
+    full = store.create(url="https://example.com/full", schema_name="auto", storage_format="json")
+    partial = store.create(url="https://example.com/partial", schema_name="auto", storage_format="json")
+
+    store.mark_success(
+        full.task_id,
+        elapsed_ms=10,
+        quality_score=1.0,
+        data={
+            "selected_fields": ["title", "price"],
+            "data": {"title": "Phone", "price": "99"},
+            "_validation": {"status": "full_success", "completeness_score": 1.0},
+        },
+    )
+    store.mark_success(
+        partial.task_id,
+        elapsed_ms=10,
+        quality_score=0.5,
+        data={
+            "selected_fields": ["title", "price"],
+            "data": {"title": "Phone", "price": ""},
+            "_validation": {"status": "partial_success", "completeness_score": 0.5},
+        },
+    )
+
+    overview = store.build_operational_overview()
+
+    assert overview["field_valid_rate_on_success"] == 0.75
 
 
 def test_task_store_classifies_fetcher_failures_for_metrics():
@@ -145,6 +182,7 @@ def test_task_store_classifies_fetcher_failures_for_metrics():
     assert classify("429 rate limit exceeded") == "rate_limit"
     assert classify("anti-bot shell page detected") == "anti_bot_or_shell"
     assert classify("network connect error") == "network"
+    assert classify("unreachable_url: invalid_url") == "unreachable"
 
 
 def test_task_store_rejects_quota_overage_before_batch_creation(tmp_path):
@@ -399,20 +437,25 @@ def test_task_store_customer_success_automation_alerts(tmp_path):
             data={"_execution_context": {"template_id": template.template_id}},
             tenant_id="tenant-template",
         )
+    today = date.today()
+    previous_period_date = (today - timedelta(days=10)).isoformat()
+    recent_period_date = (today - timedelta(days=3)).isoformat()
     with store._connect() as conn:
         conn.execute(
             """
             UPDATE task_operational_metrics
-            SET updated_at='2026-05-10T00:00:00'
+            SET updated_at=?
             WHERE tenant_id='tenant-template' AND status='success'
-            """
+            """,
+            (f"{previous_period_date}T00:00:00",),
         )
         conn.execute(
             """
             UPDATE task_operational_metrics
-            SET updated_at='2026-05-18T00:00:00'
+            SET updated_at=?
             WHERE tenant_id='tenant-template' AND status='failed'
-            """
+            """,
+            (f"{recent_period_date}T00:00:00",),
         )
         conn.commit()
 

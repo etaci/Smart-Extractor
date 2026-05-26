@@ -1,5 +1,6 @@
 from smart_extractor.config import FetcherConfig
 from smart_extractor.fetcher.base import FetchResult
+from smart_extractor.fetcher.url_preflight import URLPreflightResult
 from smart_extractor.fetcher.static import StaticFetcher
 
 
@@ -66,3 +67,23 @@ def test_static_fetcher_headers_include_browser_hints():
     assert headers["User-Agent"].startswith("Mozilla/5.0")
     assert headers["Accept-Encoding"] == "gzip, deflate, br"
     assert headers["sec-ch-ua-platform"] == '"Windows"'
+
+
+def test_static_fetcher_aborts_unreachable_url_after_preflight(monkeypatch):
+    def fake_preflight(url, **kwargs):
+        return URLPreflightResult(
+            original_url=url,
+            final_url=url,
+            status_code=404,
+            reachable=False,
+            reason="http_404",
+        )
+
+    monkeypatch.setattr("smart_extractor.fetcher.static.preflight_url", fake_preflight)
+    fetcher = StaticFetcher(FetcherConfig(url_preflight_enabled=True))
+
+    result = fetcher.fetch("https://example.com/missing")
+
+    assert result.status_code == 404
+    assert result.error == "unreachable_url: http_404"
+    assert result.headers["x-smart-url-preflight"] == "unreachable"
