@@ -19,6 +19,22 @@ from smart_extractor.utils.anti_detect import (
 )
 
 
+def _classify_transport_error(exc: Exception) -> str:
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "connect_timeout"
+    if isinstance(exc, httpx.ReadTimeout):
+        return "read_timeout"
+    if isinstance(exc, httpx.PoolTimeout):
+        return "pool_timeout"
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.DecodingError):
+        return "decode_error"
+    if isinstance(exc, httpx.ConnectError):
+        return "network"
+    return type(exc).__name__
+
+
 class StaticFetcher(BaseFetcher):
     """HTTPX-based fetcher with proxy-pool retry and challenge detection."""
 
@@ -75,6 +91,44 @@ class StaticFetcher(BaseFetcher):
             )
         return headers
 
+    def _build_diagnostics(
+        self,
+        *,
+        stage: str,
+        reason: str,
+        status_code: int = 0,
+        final_url: str = "",
+        headers: dict[str, str] | None = None,
+        body_size: int = 0,
+        is_shell_page: bool = False,
+        retry_count: int = 0,
+        redirect_chain: list[str] | None = None,
+    ) -> dict[str, object]:
+        content_type = str((headers or {}).get("content-type") or "")
+        return {
+            "failure_stage": stage,
+            "failure_reason": reason,
+            "http_status": int(status_code or 0),
+            "final_url": final_url,
+            "redirect_chain": list(redirect_chain or []),
+            "content_type": content_type,
+            "body_size": int(body_size or 0),
+            "is_shell_page": bool(is_shell_page),
+            "retry_count": int(retry_count or 0),
+        }
+
+    @staticmethod
+    def _read_response_text(response: httpx.Response) -> tuple[str, str]:
+        try:
+            return response.text, ""
+        except UnicodeError as exc:
+            try:
+                return response.content.decode("utf-8", errors="replace"), f"decode_error: {type(exc).__name__}"
+            except Exception:
+                return "", f"decode_error: {type(exc).__name__}"
+        except Exception as exc:
+            return "", f"decode_error: {type(exc).__name__}: {exc}"
+
     def _should_escalate_to_dynamic(self, result: FetchResult | None) -> bool:
         if not bool(getattr(self._config, "static_fallback_to_dynamic", True)):
             return False
@@ -130,6 +184,7 @@ class StaticFetcher(BaseFetcher):
                 timeout_ms=int(getattr(self._config, "url_preflight_timeout_ms", 5000) or 5000),
                 headers=headers,
                 verify_ssl=bool(self._config.verify_ssl),
+                sitemap_fallback_enabled=bool(getattr(self._config, "sitemap_fallback_enabled", True)),
             )
             if (
                 not preflight.reachable
@@ -146,6 +201,14 @@ class StaticFetcher(BaseFetcher):
                     },
                     error=f"unreachable_url: {preflight.reason}",
                     elapsed_ms=(time.perf_counter() - overall_start) * 1000,
+                    diagnostics=self._build_diagnostics(
+                        stage="preflight",
+                        reason=preflight.reason,
+                        status_code=preflight.status_code,
+                        final_url=preflight.final_url,
+                        headers=preflight.headers,
+                        redirect_chain=preflight.redirect_chain,
+                    ),
                 )
             if preflight.target_url and preflight.target_url != url:
                 logger.info("StaticFetcher URL preflight resolved: {} -> {}", url, preflight.target_url)
@@ -164,7 +227,7 @@ class StaticFetcher(BaseFetcher):
             try:
                 client = self._ensure_client(attempt.proxy_url or None)
                 response = client.get(url, headers=self._build_headers())
-                html = response.text
+                html, decode_error = self._read_response_text(response)
                 headers = dict(response.headers)
                 headers.update(
                     {
@@ -188,6 +251,17 @@ class StaticFetcher(BaseFetcher):
                     elapsed_ms=(time.perf_counter() - overall_start) * 1000,
                     is_shell_page=assessment.shell_page or assessment.challenge,
                     retry_count=attempt_index - 1,
+                    diagnostics=self._build_diagnostics(
+                        stage="fetch",
+                        reason=assessment.reason or decode_error or "",
+                        status_code=response.status_code,
+                        final_url=str(response.url),
+                        headers=headers,
+                        body_size=len(html or ""),
+                        is_shell_page=assessment.shell_page or assessment.challenge,
+                        retry_count=attempt_index - 1,
+                        redirect_chain=[str(item.url) for item in getattr(response, "history", [])] + [str(response.url)],
+                    ),
                 )
                 if assessment.retryable and attempt_index < len(attempts):
                     logger.warning(
@@ -209,6 +283,11 @@ class StaticFetcher(BaseFetcher):
                     error=error_message,
                     elapsed_ms=(time.perf_counter() - overall_start) * 1000,
                     retry_count=attempt_index - 1,
+                    diagnostics=self._build_diagnostics(
+                        stage="transport",
+                        reason=_classify_transport_error(exc),
+                        retry_count=attempt_index - 1,
+                    ),
                 )
                 logger.warning(
                     "StaticFetcher 抓取失败: url={} attempt={} proxy={} error={}",

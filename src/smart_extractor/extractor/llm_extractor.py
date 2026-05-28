@@ -267,7 +267,7 @@ class LLMExtractor(BaseExtractor):
         }
         formatted_text = _format_dynamic_text(normalized_labels, filtered_data)
 
-        return normalize_dynamic_result(DynamicExtractResult(
+        result = normalize_dynamic_result(DynamicExtractResult(
             page_type=page_type,
             candidate_fields=candidate_fields,
             selected_fields=actual_fields,
@@ -282,12 +282,87 @@ class LLMExtractor(BaseExtractor):
                     {
                         "rule_hint_strategy": specialized_result.extraction_strategy,
                         "rule_hint_completeness": specialized_result.completeness_score(),
+                        "llm_rescue_trigger": "specialized_rule_low_completeness",
                     }
                     if specialized_result is not None
                     else {}
                 ),
             },
         ))
+        if self._should_rescue_missing_fields(result):
+            result = self._rescue_missing_fields(
+                result,
+                text=text,
+                source_url=source_url,
+            )
+        return result
+
+    def _should_rescue_missing_fields(self, result: DynamicExtractResult) -> bool:
+        if not bool(getattr(self._config, "missing_field_rescue_enabled", True)):
+            return False
+        fields = result.selected_fields or result.candidate_fields
+        if not fields:
+            return False
+        missing = [field for field in fields if result.data.get(field) in (None, "", [], {})]
+        if not missing:
+            return False
+        completeness = result.completeness_score()
+        min_completeness = float(
+            getattr(self._config, "missing_field_rescue_min_completeness", 0.25) or 0.25
+        )
+        return completeness >= min_completeness
+
+    def _rescue_missing_fields(
+        self,
+        result: DynamicExtractResult,
+        *,
+        text: str,
+        source_url: str,
+    ) -> DynamicExtractResult:
+        fields = result.selected_fields or result.candidate_fields
+        missing = [field for field in fields if result.data.get(field) in (None, "", [], {})]
+        if not missing:
+            return result
+        prompt = (
+            "Fill only the missing fields from structured candidates and page text. "
+            "Validate structured candidates first, then infer from text only when evidence is clear. "
+            "Return JSON with a single object: {\"data\": {...}}. "
+            f"Source URL: {source_url}\n"
+            f"Missing fields: {missing}\n"
+            f"Existing data: {json.dumps(result.data, ensure_ascii=False)}\n\n"
+            f"{self._truncate_text(text)[:6000]}"
+        )
+        try:
+            payload = self._call_json_llm(
+                system_prompt=DYNAMIC_SYSTEM_PROMPT,
+                user_prompt=prompt,
+            )
+        except Exception as exc:
+            logger.warning("缺失字段二次 LLM 补齐失败: {}", exc)
+            result.strategy_details = {
+                **(result.strategy_details if isinstance(result.strategy_details, dict) else {}),
+                "missing_field_rescue_attempted": True,
+                "missing_field_rescue_fallback": True,
+            }
+            return result
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        if not isinstance(data, dict):
+            data = payload if isinstance(payload, dict) else {}
+        filled: dict[str, Any] = {}
+        for field in missing:
+            value = data.get(field)
+            if value not in (None, "", [], {}):
+                result.data[field] = value
+                filled[field] = value
+        if filled:
+            result.formatted_text = _format_dynamic_text(result.field_labels, result.data)
+        result.strategy_details = {
+            **(result.strategy_details if isinstance(result.strategy_details, dict) else {}),
+            "missing_field_rescue_attempted": True,
+            "missing_field_rescue_filled": list(filled),
+            "llm_rescue_trigger": "missing_fields",
+        }
+        return normalize_dynamic_result(result)
 
     def extract_batch(
         self,

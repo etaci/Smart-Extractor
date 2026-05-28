@@ -40,6 +40,19 @@ _DEFAULT_HEADERS = {
 
 _SHELL_TEXT_MAX_LENGTH = 40
 
+_CORE_CONTENT_SELECTORS = (
+    "main",
+    "article",
+    "[role='main']",
+    "[itemtype*='Product']",
+    "[itemtype*='Article']",
+    "[itemtype*='JobPosting']",
+    "[data-testid*='product']",
+    "[class*='product']",
+    "[class*='price']",
+    "[class*='job']",
+)
+
 _ANTI_DETECT_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
@@ -47,6 +60,23 @@ Object.defineProperty(navigator, 'language', { get: () => 'zh-CN' });
 Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en-US', 'en'] });
 window.chrome = window.chrome || { runtime: {} };
 """
+
+
+def _classify_playwright_error(exc: Exception) -> str:
+    message = str(exc or "").lower()
+    if "timeout" in message and "networkidle" in message:
+        return "network_idle_timeout"
+    if "timeout" in message and ("selector" in message or "locator" in message):
+        return "render_timeout"
+    if "timeout" in message:
+        return "render_timeout"
+    if "net::err_name_not_resolved" in message or "dns" in message:
+        return "dns_timeout"
+    if "net::err_connection" in message or "connection" in message:
+        return "network"
+    if "ssl" in message or "tls" in message or "certificate" in message:
+        return "tls_timeout"
+    return type(exc).__name__
 
 
 class PlaywrightFetcher(BaseFetcher):
@@ -266,6 +296,52 @@ class PlaywrightFetcher(BaseFetcher):
             last_length = max(last_length, len(body_text))
             page.wait_for_timeout(500)
 
+    def _wait_for_core_selectors(self, page: Page) -> None:
+        timeout_ms = max(0, int(getattr(self._config, "core_selector_wait_ms", 2500) or 0))
+        if timeout_ms <= 0:
+            return
+        try:
+            page.wait_for_selector(
+                ", ".join(_CORE_CONTENT_SELECTORS),
+                timeout=timeout_ms,
+                state="attached",
+            )
+        except Exception:
+            return
+
+    @staticmethod
+    def _extract_reader_html(page: Page) -> str:
+        try:
+            blocks = page.evaluate(
+                """
+                () => {
+                    const selectors = [
+                        'main', 'article', '[role="main"]',
+                        '[itemtype*="Product"]', '[itemtype*="Article"]', '[itemtype*="JobPosting"]',
+                        '[class*="product"]', '[class*="price"]', '[class*="job"]',
+                        '[data-testid*="product"]'
+                    ];
+                    const seen = new Set();
+                    const out = [];
+                    for (const selector of selectors) {
+                        for (const node of document.querySelectorAll(selector)) {
+                            const text = (node.innerText || node.textContent || '').trim();
+                            if (text.length < 40 || seen.has(text)) continue;
+                            seen.add(text);
+                            out.push(`<section data-smart-reader-block="1">${node.innerHTML}</section>`);
+                            if (out.length >= 8) return out;
+                        }
+                    }
+                    return out;
+                }
+                """
+            )
+            if isinstance(blocks, list):
+                return "\n".join(str(item) for item in blocks if str(item).strip())
+        except Exception:
+            return ""
+        return ""
+
     def _stabilize_page(
         self,
         page: Page,
@@ -296,7 +372,15 @@ class PlaywrightFetcher(BaseFetcher):
                 page.wait_for_timeout(self._config.challenge_retry_backoff_ms)
             page.reload(timeout=self._config.timeout, wait_until="domcontentloaded")
             try:
-                page.wait_for_load_state("networkidle", timeout=min(self._config.timeout, 5000))
+                network_idle_timeout = max(
+                    0,
+                    min(
+                        int(getattr(self._config, "network_idle_timeout_ms", 2500) or 0),
+                        self._config.timeout,
+                    ),
+                )
+                if network_idle_timeout:
+                    page.wait_for_load_state("networkidle", timeout=network_idle_timeout)
             except Exception:
                 pass
             reload_count += 1
@@ -330,6 +414,31 @@ class PlaywrightFetcher(BaseFetcher):
             headers=headers,
             status_code=status_code,
         )
+
+    @staticmethod
+    def _build_diagnostics(
+        *,
+        stage: str,
+        reason: str,
+        status_code: int = 0,
+        final_url: str = "",
+        headers: dict[str, str] | None = None,
+        body_size: int = 0,
+        is_shell_page: bool = False,
+        retry_count: int = 0,
+        redirect_chain: list[str] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "failure_stage": stage,
+            "failure_reason": reason,
+            "http_status": int(status_code or 0),
+            "final_url": final_url,
+            "redirect_chain": list(redirect_chain or []),
+            "content_type": str((headers or {}).get("content-type") or ""),
+            "body_size": int(body_size or 0),
+            "is_shell_page": bool(is_shell_page),
+            "retry_count": int(retry_count or 0),
+        }
 
     def _maybe_early_stop_challenge(
         self,
@@ -481,6 +590,7 @@ class PlaywrightFetcher(BaseFetcher):
             )
             status_code = response.status if response else 0
             headers = dict(response.headers) if response else {}
+            self._wait_for_core_selectors(page)
             if bool(getattr(self._config, "challenge_early_stop_enabled", True)):
                 early_assessment = self._maybe_early_stop_challenge(
                     page,
@@ -505,6 +615,16 @@ class PlaywrightFetcher(BaseFetcher):
                         elapsed_ms=(time.perf_counter() - overall_start) * 1000,
                         is_shell_page=True,
                         retry_count=retry_count_offset,
+                        diagnostics=self._build_diagnostics(
+                            stage="render",
+                            reason=early_assessment.reason or "challenge_page",
+                            status_code=status_code,
+                            final_url=url,
+                            headers=headers,
+                            body_size=len(html or ""),
+                            is_shell_page=True,
+                            retry_count=retry_count_offset,
+                        ),
                     ), early_assessment
             try:
                 page.wait_for_load_state("networkidle", timeout=min(self._config.timeout, 5000))
@@ -531,6 +651,17 @@ class PlaywrightFetcher(BaseFetcher):
                 self._save_screenshot(page, url, suffix=f"attempt{attempt.attempt_no}")
 
             html = page.content()
+            reader_html = ""
+            if bool(getattr(self._config, "reader_mode_rescue_enabled", True)):
+                body_text = self._extract_body_text(page)
+                if len(body_text) < 160 or looks_like_loading_text(body_text, max_length=160):
+                    reader_html = self._extract_reader_html(page)
+                    if reader_html:
+                        html = (
+                            html.replace("</body>", reader_html + "\n</body>", 1)
+                            if "</body>" in html
+                            else f"{html}\n{reader_html}"
+                        )
             if captured_json:
                 html = self._append_captured_json_hints(html, captured_json)
             headers = {
@@ -539,6 +670,7 @@ class PlaywrightFetcher(BaseFetcher):
                 "x-smart-fetch-mobile-ua": "1" if attempt.mobile_user_agent else "0",
                 "x-smart-fetch-json-responses": str(len(captured_json)),
                 "x-smart-fetch-html-length": str(len(html or "")),
+                "x-smart-reader-mode-blocks": "1" if reader_html else "0",
             }
             assessment = self._assess_page(
                 page,
@@ -558,6 +690,16 @@ class PlaywrightFetcher(BaseFetcher):
                 elapsed_ms=(time.perf_counter() - overall_start) * 1000,
                 is_shell_page=assessment.shell_page or assessment.challenge,
                 retry_count=retry_count_offset + reload_count,
+                diagnostics=self._build_diagnostics(
+                    stage="render",
+                    reason=assessment.reason or "",
+                    status_code=status_code,
+                    final_url=url,
+                    headers=headers,
+                    body_size=len(html or ""),
+                    is_shell_page=assessment.shell_page or assessment.challenge,
+                    retry_count=retry_count_offset + reload_count,
+                ),
             )
             return result, assessment
         except Exception as exc:
@@ -569,6 +711,11 @@ class PlaywrightFetcher(BaseFetcher):
                 error=error_message,
                 elapsed_ms=(time.perf_counter() - overall_start) * 1000,
                 retry_count=retry_count_offset,
+                diagnostics=self._build_diagnostics(
+                    stage="render",
+                    reason=_classify_playwright_error(exc),
+                    retry_count=retry_count_offset,
+                ),
             )
             return result, assessment
         finally:
@@ -630,6 +777,7 @@ class PlaywrightFetcher(BaseFetcher):
                 timeout_ms=int(getattr(self._config, "url_preflight_timeout_ms", 5000) or 5000),
                 headers=dict(_DEFAULT_HEADERS),
                 verify_ssl=bool(self._config.verify_ssl),
+                sitemap_fallback_enabled=bool(getattr(self._config, "sitemap_fallback_enabled", True)),
             )
             preflight_headers = {
                 "x-smart-url-preflight": "ok" if preflight.reachable else "unreachable",
@@ -647,6 +795,14 @@ class PlaywrightFetcher(BaseFetcher):
                     headers={**preflight.headers, **preflight_headers},
                     error=f"unreachable_url: {preflight.reason}",
                     elapsed_ms=(time.perf_counter() - overall_start) * 1000,
+                    diagnostics=self._build_diagnostics(
+                        stage="preflight",
+                        reason=preflight.reason,
+                        status_code=preflight.status_code,
+                        final_url=preflight.final_url,
+                        headers=preflight.headers,
+                        redirect_chain=preflight.redirect_chain,
+                    ),
                 )
             if preflight.target_url and preflight.target_url != url:
                 logger.info("PlaywrightFetcher URL preflight resolved: {} -> {}", url, preflight.target_url)

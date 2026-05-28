@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -18,6 +19,7 @@ class URLPreflightResult:
     reason: str = ""
     canonical_url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    redirect_chain: list[str] = field(default_factory=list)
 
     @property
     def target_url(self) -> str:
@@ -30,6 +32,7 @@ def preflight_url(
     timeout_ms: int = 5000,
     headers: dict[str, str] | None = None,
     verify_ssl: bool = True,
+    sitemap_fallback_enabled: bool = True,
 ) -> URLPreflightResult:
     """Resolve redirects and obvious unreachable URLs without loading a browser."""
 
@@ -52,7 +55,58 @@ def preflight_url(
             result.status_code = int(response.status_code or 0)
             result.final_url = str(response.url)
             result.headers = dict(response.headers)
+            result.redirect_chain = [str(item.url) for item in getattr(response, "history", [])] + [result.final_url]
             if result.status_code in {404, 410}:
+                canonical_from_error = _extract_canonical_url(
+                    response.text,
+                    base_url=result.final_url,
+                ) or _extract_og_url(response.text, base_url=result.final_url)
+                if canonical_from_error and canonical_from_error != normalized_url:
+                    canonical_response = _head_or_probe_get(client, canonical_from_error, request_headers)
+                    if 200 <= int(canonical_response.status_code or 0) < 400:
+                        result.status_code = int(canonical_response.status_code or 0)
+                        result.final_url = str(canonical_response.url)
+                        result.canonical_url = canonical_from_error
+                        result.headers = {
+                            **dict(canonical_response.headers),
+                            "x-smart-url-preflight-repaired-from": normalized_url,
+                        }
+                        result.redirect_chain = [normalized_url, result.final_url]
+                        result.reason = "canonical_fallback"
+                        return result
+                repaired = (
+                    _resolve_sitemap_fallback(client, normalized_url, request_headers)
+                    if sitemap_fallback_enabled
+                    else ""
+                )
+                if repaired:
+                    repaired_response = _head_or_probe_get(client, repaired, request_headers)
+                    result.status_code = int(repaired_response.status_code or 0)
+                    result.final_url = str(repaired_response.url)
+                    result.headers = {
+                        **dict(repaired_response.headers),
+                        "x-smart-url-preflight-repaired-from": normalized_url,
+                    }
+                    if 200 <= result.status_code < 400:
+                        result.canonical_url = _extract_canonical_url(
+                            repaired_response.text,
+                            base_url=result.final_url,
+                        )
+                        result.reason = "sitemap_fallback"
+                        return result
+                variant = _resolve_url_variant(client, normalized_url, request_headers)
+                if variant:
+                    variant_response = _head_or_probe_get(client, variant, request_headers)
+                    if 200 <= int(variant_response.status_code or 0) < 400:
+                        result.status_code = int(variant_response.status_code or 0)
+                        result.final_url = str(variant_response.url)
+                        result.headers = {
+                            **dict(variant_response.headers),
+                            "x-smart-url-preflight-repaired-from": normalized_url,
+                        }
+                        result.redirect_chain = [normalized_url, result.final_url]
+                        result.reason = "url_variant_fallback"
+                        return result
                 result.reachable = False
                 result.reason = f"http_{result.status_code}"
                 return result
@@ -89,22 +143,29 @@ def _head_or_probe_get(
     url: str,
     headers: dict[str, str],
 ) -> httpx.Response:
+    head_response: httpx.Response | None = None
     try:
         response = client.head(url, headers=headers)
-        if response.status_code not in {405, 403, 429}:
+        head_response = response
+        if response.status_code not in {405, 403, 404, 410, 429}:
             return response
     except httpx.HTTPError:
         pass
 
-    with client.stream("GET", url, headers={**headers, "Range": "bytes=0-65535"}) as response:
-        content = response.read()
-        return httpx.Response(
-            status_code=response.status_code,
-            headers=response.headers,
-            content=content,
-            request=response.request,
-            extensions=response.extensions,
-        )
+    try:
+        with client.stream("GET", url, headers={**headers, "Range": "bytes=0-65535"}) as response:
+            content = response.read()
+            return httpx.Response(
+                status_code=response.status_code,
+                headers=response.headers,
+                content=content,
+                request=response.request,
+                extensions=response.extensions,
+            )
+    except AttributeError:
+        if head_response is not None:
+            return head_response
+        raise
 
 
 def _extract_canonical_url(html: str, *, base_url: str) -> str:
@@ -119,3 +180,94 @@ def _extract_canonical_url(html: str, *, base_url: str) -> str:
     if not href:
         return ""
     return urljoin(base_url, str(href).strip())
+
+
+def _extract_og_url(html: str, *, base_url: str) -> str:
+    if not html:
+        return ""
+    try:
+        soup = BeautifulSoup(html[:200_000], "lxml")
+    except Exception:
+        return ""
+    tag = soup.find("meta", attrs={"property": "og:url"}) or soup.find(
+        "meta",
+        attrs={"name": "og:url"},
+    )
+    content = tag.get("content") if tag else ""
+    return urljoin(base_url, str(content).strip()) if content else ""
+
+
+def _resolve_sitemap_fallback(
+    client: httpx.Client,
+    url: str,
+    headers: dict[str, str],
+) -> str:
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return ""
+    slug = PathLikeSlug(parts.path)
+    if not slug:
+        return ""
+    candidates: list[str] = []
+    for sitemap_path in ("/sitemap.xml", "/sitemap_index.xml"):
+        sitemap_url = urlunsplit((parts.scheme, parts.netloc, sitemap_path, "", ""))
+        try:
+            response = client.get(sitemap_url, headers=headers)
+        except Exception:
+            continue
+        if response.status_code >= 400:
+            continue
+        candidates.extend(re.findall(r"<loc>\s*([^<]+)\s*</loc>", response.text or "", flags=re.I))
+    if not candidates:
+        return ""
+    normalized_slug = slug.lower()
+    for candidate in candidates[:1000]:
+        candidate_url = candidate.strip()
+        candidate_slug = PathLikeSlug(urlsplit(candidate_url).path).lower()
+        if candidate_slug and candidate_slug == normalized_slug:
+            return candidate_url
+    return ""
+
+
+def _resolve_url_variant(
+    client: httpx.Client,
+    url: str,
+    headers: dict[str, str],
+) -> str:
+    for candidate in _iter_url_variants(url):
+        try:
+            response = client.head(candidate, headers=headers)
+        except Exception:
+            continue
+        if 200 <= int(response.status_code or 0) < 400:
+            return candidate
+    return ""
+
+
+def _iter_url_variants(url: str) -> list[str]:
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return []
+    variants: list[str] = []
+    path = parts.path or "/"
+    if path != "/":
+        toggled_path = path.rstrip("/") if path.endswith("/") else f"{path}/"
+        variants.append(urlunsplit((parts.scheme, parts.netloc, toggled_path, parts.query, parts.fragment)))
+        variants.append(urlunsplit((parts.scheme, parts.netloc, f"/m{path}", parts.query, parts.fragment)))
+    host = parts.netloc
+    alt_host = host[4:] if host.startswith("www.") else f"www.{host}"
+    variants.append(urlunsplit((parts.scheme, alt_host, path, parts.query, parts.fragment)))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for variant in variants:
+        if variant != url and variant not in seen:
+            seen.add(variant)
+            ordered.append(variant)
+    return ordered
+
+
+def PathLikeSlug(path: str) -> str:
+    normalized = str(path or "").strip().rstrip("/")
+    if not normalized:
+        return ""
+    return normalized.rsplit("/", 1)[-1].strip()

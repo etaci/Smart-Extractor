@@ -23,6 +23,8 @@ class FetchResult(BaseModel):
     is_shell_page: bool = Field(default=False, description="是否疑似前端壳页")
     retry_count: int = Field(default=0, description="抓取阶段额外重试次数")
 
+    diagnostics: dict[str, object] = Field(default_factory=dict, description="Fetch diagnostics")
+
     @property
     def is_success(self) -> bool:
         """判断抓取是否成功"""

@@ -167,12 +167,22 @@ class ExtractionPipeline:
         self._deduplicator.mark_visited(url)
         self._fire_hooks("after_fetch", url=url, fetch_result=fetch_result)
         base_cleaned_text = self._cleaner.clean(fetch_result.html, selector=css_selector)
+        structured_hints = build_structured_hints(
+            fetch_result.html,
+            selected_fields=selected_fields,
+        )
         if self._looks_like_verification_page(base_cleaned_text):
             result.error = self.normalize_user_facing_error("目标站点返回安全验证页面，当前无法提取真实内容")
             return result
-        if self._looks_like_loading_page(base_cleaned_text):
+        if self._looks_like_loading_page(base_cleaned_text) and not structured_hints:
             result.error = self.normalize_user_facing_error("页面仍停留在加载状态，当前无法提取真实内容")
             return result
+        if (
+            not base_cleaned_text.strip()
+            and structured_hints
+            and bool(getattr(self._config.fetcher, "empty_clean_rescue_enabled", True))
+        ):
+            base_cleaned_text = structured_hints
         if not base_cleaned_text.strip():
             result.error = self.normalize_user_facing_error("网页清洗后为空")
             return result
@@ -180,11 +190,18 @@ class ExtractionPipeline:
             fetch_result.html,
             base_cleaned_text,
             selected_fields=selected_fields,
+            structured_hints=structured_hints,
         )
         result.cleaned_text = cleaned_text
         self._fire_hooks("after_clean", cleaned_text=cleaned_text)
         if use_dynamic_mode:
             extracted_data = self._run_dynamic_extraction(cleaned_text, source_url=url, selected_fields=selected_fields or [], force_strategy=force_strategy)
+            extracted_data = self._maybe_complete_missing_fields(
+                extracted_data,
+                cleaned_text=cleaned_text,
+                source_url=url,
+                selected_fields=selected_fields or [],
+            )
         else:
             if target_schema is None:
                 result.error = self.normalize_user_facing_error("Schema 未正确解析")
@@ -216,15 +233,73 @@ class ExtractionPipeline:
         result.success = True
         return result
 
+    def _maybe_complete_missing_fields(
+        self,
+        extracted_data: DynamicExtractResult,
+        *,
+        cleaned_text: str,
+        source_url: str,
+        selected_fields: list[str],
+    ) -> DynamicExtractResult:
+        fields = selected_fields or list(getattr(extracted_data, "selected_fields", []) or [])
+        if not fields:
+            return extracted_data
+        missing = [
+            field
+            for field in fields
+            if (getattr(extracted_data, "data", {}) or {}).get(field) in (None, "", [], {})
+        ]
+        if not missing:
+            return extracted_data
+        if len(cleaned_text.strip()) < 80:
+            return extracted_data
+        strategy = str(getattr(extracted_data, "extraction_strategy", "") or "").lower()
+        if strategy == "llm" and extracted_data.completeness_score() >= 0.75:
+            return extracted_data
+        try:
+            completion = self._extractor.extract_dynamic(
+                cleaned_text,
+                source_url=source_url,
+                selected_fields=missing,
+            )
+        except Exception as exc:
+            logger.debug("missing-field LLM completion failed: {}", exc)
+            return extracted_data
+        completion_data = getattr(completion, "data", {}) or {}
+        patched = dict(getattr(extracted_data, "data", {}) or {})
+        changed = False
+        for field in missing:
+            value = completion_data.get(field)
+            if value not in (None, "", [], {}):
+                patched[field] = value
+                changed = True
+        if not changed:
+            return extracted_data
+        labels = dict(getattr(extracted_data, "field_labels", {}) or {})
+        for field in missing:
+            labels.setdefault(field, field)
+        details = getattr(extracted_data, "strategy_details", {}) or {}
+        extracted_data.data = patched
+        extracted_data.field_labels = labels
+        extracted_data.strategy_details = {
+            **(details if isinstance(details, dict) else {}),
+            "llm_rescue_trigger": "missing_fields_completion",
+            "llm_missing_fields": missing,
+        }
+        return extracted_data
+
     @staticmethod
     def _attach_structured_hints(
         html: str,
         cleaned_text: str,
         *,
         selected_fields: Optional[list[str]] = None,
+        structured_hints: str = "",
     ) -> str:
-        hints = build_structured_hints(html, selected_fields=selected_fields)
+        hints = structured_hints or build_structured_hints(html, selected_fields=selected_fields)
         if not hints:
+            return cleaned_text
+        if cleaned_text.startswith(hints):
             return cleaned_text
         return f"{hints}\n\n{cleaned_text}"
 
@@ -304,6 +379,7 @@ class ExtractionPipeline:
     def _run_dynamic_extraction(self, cleaned_text: str, *, source_url: str, selected_fields: list[str], force_strategy: str = "") -> DynamicExtractResult:
         normalized_force_strategy = str(force_strategy or "").strip().lower()
         matched_profile = None
+        llm_rescue_trigger = ""
         if normalized_force_strategy != "llm":
             matched_profile = self._learned_profile_store.find_best_match(source_url, selected_fields)
         if matched_profile is not None:
@@ -313,12 +389,19 @@ class ExtractionPipeline:
                 self._learned_profile_store.record_rule_attempt(matched_profile.profile_id, success=True, completeness=rule_score, source_url=source_url)
                 return rule_result
             self._learned_profile_store.record_rule_attempt(matched_profile.profile_id, success=False, completeness=rule_score, source_url=source_url)
+            llm_rescue_trigger = "learned_rule_low_completeness"
         extracted_data = self._extractor.extract_dynamic(cleaned_text, source_url=source_url, selected_fields=selected_fields)
         page_type = str(getattr(extracted_data, "page_type", "unknown") or "unknown")
         extracted_fields = list(getattr(extracted_data, "selected_fields", []) or [])
         field_labels = getattr(extracted_data, "field_labels", {}) or {}
         strategy = str(getattr(extracted_data, "extraction_strategy", "llm") or "llm")
         strategy_details = getattr(extracted_data, "strategy_details", {}) or {}
+        if llm_rescue_trigger:
+            extracted_data.strategy_details = {
+                **(strategy_details if isinstance(strategy_details, dict) else {}),
+                "llm_rescue_trigger": llm_rescue_trigger,
+            }
+            strategy_details = extracted_data.strategy_details
         if self._should_persist_learned_profile(extracted_data):
             learned_profile = self._learned_profile_store.upsert_from_result(source_url, page_type=page_type, selected_fields=extracted_fields, field_labels=field_labels if isinstance(field_labels, dict) else {}, strategy=strategy, completeness=extracted_data.completeness_score())
             extracted_data.learned_profile_id = learned_profile.profile_id

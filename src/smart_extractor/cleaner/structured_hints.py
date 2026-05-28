@@ -174,6 +174,10 @@ def _iter_hydration_payloads(soup: BeautifulSoup) -> list[Any]:
                 "__INITIAL_STATE__",
                 "__PRELOADED_STATE__",
                 "__REACT_QUERY_STATE__",
+                "ShopifyAnalytics",
+                "BigCommerce",
+                "__SFCC",
+                "variants",
             )
         ):
             continue
@@ -184,6 +188,11 @@ def _iter_hydration_payloads(soup: BeautifulSoup) -> list[Any]:
             "__INITIAL_STATE__",
             "__PRELOADED_STATE__",
             "__REACT_QUERY_STATE__",
+            "ShopifyAnalytics.meta.product",
+            "ShopifyAnalytics.meta",
+            "window.Shopify",
+            "BigCommerce",
+            "__SFCC",
         ):
             for candidate in _extract_json_assignments(raw, marker):
                 parsed = _safe_json_loads(candidate)
@@ -293,6 +302,11 @@ def _extract_json_ld_hints(payload: Any) -> dict[str, str]:
             hints.setdefault("agency", _normalize_value(item.get("publisher")))
         if item.get("brand"):
             hints.setdefault("brand", _normalize_value(item.get("brand")))
+        if item.get("sku"):
+            hints.setdefault("sku", _normalize_value(item.get("sku")))
+        for gtin_key in ("gtin", "gtin8", "gtin12", "gtin13", "gtin14"):
+            if item.get(gtin_key):
+                hints.setdefault("gtin", _normalize_value(item.get(gtin_key)))
         if item.get("hiringOrganization"):
             hints.setdefault("company", _normalize_value(item.get("hiringOrganization")))
         if item.get("jobLocation"):
@@ -346,7 +360,7 @@ def _extract_hydration_hints(payload: Any) -> dict[str, str]:
         if name_value:
             product_like = _type_matches(item_type, {"product", "offer"}) or any(
                 key in normalized_keys
-                for key in ("price", "saleprice", "currentprice", "productname", "availability")
+                for key in ("price", "saleprice", "currentprice", "productname", "availability", "variants")
             )
             if product_like:
                 hints.setdefault("name", name_value)
@@ -365,12 +379,33 @@ def _extract_hydration_hints(payload: Any) -> dict[str, str]:
             normalized_keys,
             ("price", "saleprice", "currentprice", "amount", "lowprice", "monthlyprice", "annualprice"),
         )
+        if not price and isinstance(item.get("variants"), list):
+            for variant in item.get("variants") or []:
+                if not isinstance(variant, dict):
+                    continue
+                variant_keys = {str(key).strip().lower(): key for key in variant.keys()}
+                price = _first_key_value(
+                    variant,
+                    variant_keys,
+                    ("price", "saleprice", "currentprice", "amount"),
+                )
+                if price:
+                    break
         currency = _first_key_value(item, normalized_keys, ("currency", "pricecurrency"))
         if price:
             hints.setdefault("price", f"{currency} {price}".strip() if currency else price)
         plan = _first_key_value(item, normalized_keys, ("plan", "planname", "tier", "tiername", "package"))
         if plan:
             hints.setdefault("plan", plan)
+        brand = _first_key_value(item, normalized_keys, ("brand", "vendor", "manufacturer"))
+        if brand:
+            hints.setdefault("brand", _normalize_value(brand))
+        sku = _first_key_value(item, normalized_keys, ("sku", "productsku", "mpn"))
+        if sku:
+            hints.setdefault("sku", sku)
+        gtin = _first_key_value(item, normalized_keys, ("gtin", "gtin8", "gtin12", "gtin13", "gtin14", "barcode"))
+        if gtin:
+            hints.setdefault("gtin", gtin)
         billing_period = _first_key_value(
             item,
             normalized_keys,
@@ -412,6 +447,18 @@ def _extract_hydration_hints(payload: Any) -> dict[str, str]:
         if content:
             hints.setdefault("content", content)
         availability = _first_key_value(item, normalized_keys, ("availability", "stock", "inventory"))
+        if not availability and isinstance(item.get("variants"), list):
+            for variant in item.get("variants") or []:
+                if not isinstance(variant, dict):
+                    continue
+                variant_keys = {str(key).strip().lower(): key for key in variant.keys()}
+                availability = _first_key_value(
+                    variant,
+                    variant_keys,
+                    ("availability", "stock", "inventory", "available"),
+                )
+                if availability:
+                    break
         if availability:
             hints.setdefault("availability", _normalize_value(availability).split("/")[-1])
     return hints

@@ -173,6 +173,44 @@ def test_operational_overview_reports_field_valid_rate_on_success(tmp_path):
     assert overview["field_valid_rate_on_success"] == 0.75
 
 
+def test_operational_overview_reports_llm_rescue_success_rate(tmp_path):
+    db_path = tmp_path / "web_tasks.db"
+    store = SQLiteTaskStore(db_path)
+
+    rescued = store.create(url="https://example.com/rescued", schema_name="auto", storage_format="json")
+    fallback = store.create(url="https://example.com/fallback", schema_name="auto", storage_format="json")
+
+    store.mark_success(
+        rescued.task_id,
+        elapsed_ms=10,
+        quality_score=0.9,
+        data={
+            "selected_fields": ["title"],
+            "data": {"title": "OK"},
+            "strategy_details": {
+                "llm_rescue_trigger": "specialized_rule_low_completeness"
+            },
+        },
+    )
+    store.mark_success(
+        fallback.task_id,
+        elapsed_ms=10,
+        quality_score=0.6,
+        data={
+            "selected_fields": ["title"],
+            "data": {"title": "Rule Only"},
+            "strategy_details": {
+                "llm_completion_attempted": True,
+                "llm_completion_fallback": True,
+            },
+        },
+    )
+
+    overview = store.build_operational_overview()
+
+    assert overview["llm_rescue_success_rate"] == 0.5
+
+
 def test_task_store_classifies_fetcher_failures_for_metrics():
     classify = SQLiteTaskStore._classify_failure_for_metrics
 
@@ -183,6 +221,10 @@ def test_task_store_classifies_fetcher_failures_for_metrics():
     assert classify("anti-bot shell page detected") == "anti_bot_or_shell"
     assert classify("network connect error") == "network"
     assert classify("unreachable_url: invalid_url") == "unreachable"
+    assert classify("empty_after_clean: cleaned text is empty") == "empty_after_clean"
+    assert classify("UnicodeDecodeError while reading body") == "decode_error"
+    assert classify("unsupported_content: application/pdf") == "unsupported_content"
+    assert classify("http_500 upstream") == "http_400_500"
 
 
 def test_task_store_rejects_quota_overage_before_batch_creation(tmp_path):

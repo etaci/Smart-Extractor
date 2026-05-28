@@ -96,6 +96,33 @@ def test_structured_hints_extracts_next_hydration_payload():
     assert "availability: InStock" in hints
 
 
+def test_structured_hints_extracts_shopify_product_variants():
+    html = """
+    <html><head>
+      <script>
+      window.ShopifyAnalytics = window.ShopifyAnalytics || {};
+      window.ShopifyAnalytics.meta = {
+        "product": {
+          "id": 1,
+          "title": "Shopify Widget",
+          "vendor": "Acme",
+          "variants": [{"price": "1299", "available": true}]
+        }
+      };
+      </script>
+    </head><body></body></html>
+    """
+
+    hints = build_structured_hints(
+        html,
+        selected_fields=["name", "price", "availability"],
+    )
+
+    assert "name: Shopify Widget" in hints
+    assert "price: 1299" in hints
+    assert "availability: True" in hints
+
+
 def test_structured_hints_extracts_job_article_policy_and_captured_json():
     html = """
     <html><head>

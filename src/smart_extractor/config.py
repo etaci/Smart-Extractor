@@ -132,6 +132,14 @@ class LLMConfig(BaseSettings):
         default=0.75,
         description="Specialized rule results below this completeness continue to LLM completion",
     )
+    missing_field_rescue_enabled: bool = Field(
+        default=True,
+        description="Run a second compact LLM pass for missing requested fields",
+    )
+    missing_field_rescue_min_completeness: float = Field(
+        default=0.25,
+        description="Minimum initial completeness before missing-field LLM rescue",
+    )
 
     cost_input_per_million: float = Field(
         default=0.0,
@@ -219,6 +227,26 @@ class FetcherConfig(BaseSettings):
     challenge_early_stop_ms: int = Field(
         default=1200,
         description="Short body-read wait before challenge early stop",
+    )
+    core_selector_wait_ms: int = Field(
+        default=2500,
+        description="Wait briefly for high-value content selectors before rescue checks",
+    )
+    network_idle_timeout_ms: int = Field(
+        default=2500,
+        description="Maximum Playwright networkidle wait after domcontentloaded",
+    )
+    reader_mode_rescue_enabled: bool = Field(
+        default=True,
+        description="Append reader-mode content blocks when rendered body text is too short",
+    )
+    empty_clean_rescue_enabled: bool = Field(
+        default=True,
+        description="Allow structured hints to rescue pages whose cleaned body text is empty",
+    )
+    sitemap_fallback_enabled: bool = Field(
+        default=True,
+        description="Try sitemap URL repair for obvious 404 preflight failures",
     )
 
 

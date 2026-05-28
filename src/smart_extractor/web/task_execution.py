@@ -79,6 +79,78 @@ def _build_progress_hook(
     return _hook
 
 
+def _build_fetch_runtime_metrics(
+    *,
+    fetch_result,
+    use_static: bool,
+    elapsed_ms: float,
+    llm_cost_usd: float = 0.0,
+    cleaned_text: str = "",
+) -> dict:
+    if fetch_result is None:
+        return {
+            "fetcher_type": "static" if use_static else "playwright",
+            "fetch_elapsed_ms": 0.0,
+            "playwright_elapsed_ms": 0.0,
+            "retry_count": 0,
+            "retry_cost_usd": 0.0,
+            "total_elapsed_ms": float(elapsed_ms or 0.0),
+            "fetch_json_response_count": 0,
+            "mobile_ua_fallback": False,
+            "fetch_rescue": "",
+            "static_html_length": 0,
+            "dynamic_html_length": 0,
+            "fetch_diagnostics": {},
+            "failure_stage": "",
+            "failure_reason": "",
+            "http_status": 0,
+            "final_url": "",
+            "redirect_chain": [],
+            "content_type": "",
+            "body_size": 0,
+            "content_ready": False,
+        }
+    fetch_headers = (
+        fetch_result.headers
+        if isinstance(getattr(fetch_result, "headers", None), dict)
+        else {}
+    )
+    fetch_diagnostics = (
+        fetch_result.diagnostics
+        if isinstance(getattr(fetch_result, "diagnostics", None), dict)
+        else {}
+    )
+    retry_count = int(getattr(fetch_result, "retry_count", 0) or 0)
+    fetch_elapsed_ms = float(getattr(fetch_result, "elapsed_ms", 0.0) or 0.0)
+    return {
+        "fetcher_type": "static" if use_static else "playwright",
+        "fetch_elapsed_ms": fetch_elapsed_ms,
+        "playwright_elapsed_ms": fetch_elapsed_ms if not use_static else 0.0,
+        "retry_count": retry_count,
+        "retry_cost_usd": round(float(llm_cost_usd or 0.0) * max(retry_count, 0), 6),
+        "total_elapsed_ms": float(elapsed_ms or 0.0),
+        "fetch_json_response_count": int(
+            fetch_headers.get("x-smart-fetch-json-responses", 0) or 0
+        ),
+        "mobile_ua_fallback": str(
+            fetch_headers.get("x-smart-fetch-mobile-ua", "0") or "0"
+        )
+        == "1",
+        "fetch_rescue": str(fetch_headers.get("x-smart-fetch-rescue", "") or ""),
+        "static_html_length": int(fetch_headers.get("x-smart-static-html-length", 0) or 0),
+        "dynamic_html_length": int(fetch_headers.get("x-smart-dynamic-html-length", 0) or 0),
+        "fetch_diagnostics": fetch_diagnostics,
+        "failure_stage": str(fetch_diagnostics.get("failure_stage") or ""),
+        "failure_reason": str(fetch_diagnostics.get("failure_reason") or ""),
+        "http_status": int(fetch_diagnostics.get("http_status", 0) or 0),
+        "final_url": str(fetch_diagnostics.get("final_url") or ""),
+        "redirect_chain": list(fetch_diagnostics.get("redirect_chain") or []),
+        "content_type": str(fetch_diagnostics.get("content_type") or ""),
+        "body_size": int(fetch_diagnostics.get("body_size", 0) or 0),
+        "content_ready": bool(cleaned_text and not getattr(fetch_result, "is_shell_page", False)),
+    }
+
+
 def _update_monitor_result(
     *,
     task_store,
@@ -490,35 +562,13 @@ def run_extraction(
                     else 0.0
                 )
                 if fetch_result is not None:
-                    fetch_headers = (
-                        fetch_result.headers
-                        if isinstance(getattr(fetch_result, "headers", None), dict)
-                        else {}
+                    saved_data["_runtime_metrics"] = _build_fetch_runtime_metrics(
+                        fetch_result=fetch_result,
+                        use_static=use_static,
+                        elapsed_ms=elapsed_ms,
+                        llm_cost_usd=task_cost,
+                        cleaned_text=str(getattr(result, "cleaned_text", "") or ""),
                     )
-                    saved_data["_runtime_metrics"] = {
-                        "fetcher_type": "static" if use_static else "playwright",
-                        "fetch_elapsed_ms": fetch_elapsed_ms,
-                        "playwright_elapsed_ms": fetch_elapsed_ms if not use_static else 0.0,
-                        "retry_count": retry_count,
-                        "retry_cost_usd": round(task_cost * max(retry_count, 0), 6),
-                        "total_elapsed_ms": float(elapsed_ms or 0.0),
-                        "fetch_json_response_count": int(
-                            fetch_headers.get("x-smart-fetch-json-responses", 0) or 0
-                        ),
-                        "mobile_ua_fallback": str(
-                            fetch_headers.get("x-smart-fetch-mobile-ua", "0") or "0"
-                        )
-                        == "1",
-                        "fetch_rescue": str(
-                            fetch_headers.get("x-smart-fetch-rescue", "") or ""
-                        ),
-                        "static_html_length": int(
-                            fetch_headers.get("x-smart-static-html-length", 0) or 0
-                        ),
-                        "dynamic_html_length": int(
-                            fetch_headers.get("x-smart-dynamic-html-length", 0) or 0
-                        ),
-                    }
                 has_execution_context = any(
                     [
                         worker_id,
@@ -579,6 +629,15 @@ def run_extraction(
                 task.task_id,
                 elapsed_ms=elapsed_ms,
                 error=result.error or "未知错误",
+                data={
+                    "_runtime_metrics": _build_fetch_runtime_metrics(
+                        fetch_result=getattr(result, "fetch_result", None),
+                        use_static=use_static,
+                        elapsed_ms=elapsed_ms,
+                        cleaned_text=str(getattr(result, "cleaned_text", "") or ""),
+                    ),
+                    "failure_category": str(result.error or ""),
+                },
                 tenant_id=task_tenant_id,
             )
             _update_monitor_result(

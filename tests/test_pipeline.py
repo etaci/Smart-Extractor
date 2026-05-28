@@ -341,6 +341,53 @@ class TestPipelineWithMock:
             assert "质量校验" in result.error
             pipeline.close()
 
+    def test_pipeline_allows_structured_hints_to_rescue_empty_cleaned_body(self, test_config):
+        html = """
+        <html><head>
+          <script type="application/ld+json">
+          {
+            "@context": "https://schema.org",
+            "@type": "Product",
+            "name": "Structured Only Widget",
+            "offers": {"@type": "Offer", "price": "49", "priceCurrency": "USD"}
+          }
+          </script>
+        </head><body></body></html>
+        """
+        mock_fetcher = MagicMock()
+        mock_fetcher.fetch.return_value = FetchResult(
+            url="https://example.com/product",
+            html=html,
+            status_code=200,
+        )
+        mock_fetcher.close.return_value = None
+
+        pipeline = ExtractionPipeline(config=test_config, fetcher=mock_fetcher)
+        pipeline._learned_profile_store = MagicMock()
+        pipeline._learned_profile_store.find_best_match.return_value = None
+        pipeline._extractor = MagicMock()
+        pipeline._extractor.extract_dynamic.return_value = DynamicExtractResult(
+            page_type="product",
+            candidate_fields=["name", "price"],
+            selected_fields=["name", "price"],
+            field_labels={"name": "Name", "price": "Price"},
+            data={"name": "Structured Only Widget", "price": "USD 49"},
+            formatted_text="Name: Structured Only Widget\nPrice: USD 49",
+            extraction_strategy="llm",
+        )
+
+        result = pipeline.run(
+            url="https://example.com/product",
+            schema_name="auto",
+            skip_storage=True,
+            selected_fields=["name", "price"],
+        )
+
+        assert result.success is True
+        assert "Structured extraction hints:" in result.cleaned_text
+        assert "name: Structured Only Widget" in result.cleaned_text
+        pipeline.close()
+
     def test_pipeline_schema_registry(self, test_config):
         """测试 Pipeline 的 Schema 注册表"""
         with patch("smart_extractor.pipeline.LLMExtractor"):

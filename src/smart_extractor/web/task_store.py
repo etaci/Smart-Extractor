@@ -164,6 +164,36 @@ def _extract_field_valid_score(data_json: str) -> float:
         return -1.0
     filled = sum(1 for field in selected if data.get(field) not in (None, "", [], {}))
     return filled / max(len(selected), 1)
+
+
+def _extract_llm_rescue_status(data_json: str, status: str) -> tuple[bool, bool]:
+    try:
+        parsed = json.loads(data_json) if data_json else {}
+    except Exception:
+        return False, False
+    if not isinstance(parsed, dict):
+        return False, False
+    details = parsed.get("strategy_details") if isinstance(parsed.get("strategy_details"), dict) else {}
+    attempted = bool(
+        details.get("llm_rescue_trigger")
+        or details.get("rule_hint_strategy")
+        or details.get("llm_completion_attempted")
+    )
+    succeeded = attempted and str(status or "").strip().lower() == "success" and not bool(
+        details.get("llm_completion_fallback")
+    )
+    return attempted, succeeded
+
+
+def _extract_runtime_metrics(data_json: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(data_json) if data_json else {}
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    runtime = parsed.get("_runtime_metrics")
+    return runtime if isinstance(runtime, dict) else {}
 from smart_extractor.web.task_store_runtime import (
     build_failed_fields,
     build_parent_refresh_fields,
@@ -2348,6 +2378,10 @@ class SQLiteTaskStore:
             "failed": 0,
         }
         field_valid_scores: list[float] = []
+        llm_rescue_attempts = 0
+        llm_rescue_successes = 0
+        content_ready_count = 0
+        llm_success_count = 0
         for row in task_rows:
             bucket = _classify_task_result_bucket(
                 status=str(row["status"] or ""),
@@ -2358,6 +2392,30 @@ class SQLiteTaskStore:
             score = _extract_field_valid_score(str(row["data_json"] or ""))
             if score >= 0:
                 field_valid_scores.append(score)
+            rescue_attempted, rescue_succeeded = _extract_llm_rescue_status(
+                str(row["data_json"] or ""),
+                str(row["status"] or ""),
+            )
+            if rescue_attempted:
+                llm_rescue_attempts += 1
+                if rescue_succeeded:
+                    llm_rescue_successes += 1
+            runtime = _extract_runtime_metrics(str(row["data_json"] or ""))
+            if bool(runtime.get("content_ready")):
+                content_ready_count += 1
+            try:
+                total_calls = int(
+                    (
+                        json.loads(str(row["data_json"] or "{}")).get("_llm_usage", {})
+                        if str(row["data_json"] or "").strip()
+                        else {}
+                    ).get("total_calls", 0)
+                    or 0
+                )
+            except Exception:
+                total_calls = 0
+            if total_calls > 0 and str(row["status"] or "").lower() == "success":
+                llm_success_count += 1
         result_breakdown = [
             {"category": category, "count": count}
             for category, count in result_counts.items()
@@ -2380,6 +2438,12 @@ class SQLiteTaskStore:
             sum(field_valid_scores) / max(len(field_valid_scores), 1),
             4,
         )
+        llm_rescue_success_rate = round(
+            llm_rescue_successes / max(llm_rescue_attempts, 1),
+            4,
+        )
+        content_ready_rate = round(content_ready_count / max(fetched_total, 1), 4)
+        llm_success_rate = round(llm_success_count / max(today_success, 1), 4)
         return {
             "tenant_id": normalized_tenant_id,
             "date": today,
@@ -2387,7 +2451,10 @@ class SQLiteTaskStore:
             "today_success_rate": success_rate,
             "today_success_rate_label": f"{success_rate * 100:.1f}%",
             "fetch_success_rate": fetch_success_rate,
+            "content_ready_rate": content_ready_rate,
             "extraction_success_rate_on_fetched_pages": extraction_success_rate,
+            "llm_rescue_success_rate": llm_rescue_success_rate,
+            "llm_success_rate": llm_success_rate,
             "field_valid_rate_on_success": field_valid_rate,
             "failure_breakdown": failure_breakdown,
             "result_breakdown": result_breakdown,
@@ -2863,16 +2930,42 @@ class SQLiteTaskStore:
         normalized = str(error or "").strip().lower()
         if not normalized:
             return ""
+        if "empty_after_clean" in normalized:
+            return "empty_after_clean"
+        if "unsupported_content" in normalized or "unsupported content" in normalized:
+            return "unsupported_content"
+        if "decode" in normalized or "encoding" in normalized or "unicode" in normalized:
+            return "decode_error"
+        if "blocked_but_unclassified" in normalized:
+            return "blocked_but_unclassified"
         if "unreachable_url" in normalized or "invalid_url" in normalized:
             return "unreachable"
         if "404" in normalized or "not found" in normalized:
             return "not_found"
+        if "dns_timeout" in normalized:
+            return "dns_timeout"
+        if "connect_timeout" in normalized:
+            return "connect_timeout"
+        if "tls_timeout" in normalized:
+            return "tls_timeout"
+        if "ttfb_timeout" in normalized:
+            return "ttfb_timeout"
+        if "read_timeout" in normalized:
+            return "read_timeout"
+        if "render_timeout" in normalized:
+            return "render_timeout"
+        if "network_idle_timeout" in normalized:
+            return "network_idle_timeout"
         if "timeout" in normalized:
             return "timeout"
         if "429" in normalized or "rate limit" in normalized:
             return "rate_limit"
         if "401" in normalized or "403" in normalized:
             return "blocked"
+        if "http_400_500" in normalized or any(
+            f"http_{code}" in normalized for code in range(400, 600)
+        ):
+            return "http_400_500"
         if any(
             marker in normalized
             for marker in (
@@ -2924,6 +3017,15 @@ class SQLiteTaskStore:
         context = data.get("_execution_context") if isinstance(data.get("_execution_context"), dict) else {}
         field_count, filled_count, empty_count = self._count_fields(data)
         now = self._now_text()
+        diagnostic_error = " ".join(
+            str(part or "")
+            for part in (
+                task.error,
+                data.get("failure_category"),
+                runtime.get("failure_reason"),
+                runtime.get("failure_stage"),
+            )
+        )
         payload = {
             "tenant_id": normalized_tenant_id,
             "task_id": task.task_id,
@@ -2932,7 +3034,7 @@ class SQLiteTaskStore:
             "page_type": str(data.get("page_type") or ""),
             "monitor_id": str(context.get("monitor_id") or ""),
             "template_id": str(context.get("template_id") or ""),
-            "failure_category": self._classify_failure_for_metrics(task.error),
+            "failure_category": self._classify_failure_for_metrics(diagnostic_error),
             "quality_score": float(task.quality_score or 0.0),
             "field_count": field_count,
             "filled_field_count": filled_count,
