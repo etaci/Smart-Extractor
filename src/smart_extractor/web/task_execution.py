@@ -151,6 +151,26 @@ def _build_fetch_runtime_metrics(
     }
 
 
+def _build_validation_payload(validation) -> dict:
+    if validation is None:
+        return {}
+    return {
+        "status": getattr(validation, "status", "full_success"),
+        "is_valid": bool(getattr(validation, "is_valid", True)),
+        "quality_score": float(getattr(validation, "quality_score", 0.0) or 0.0),
+        "completeness_score": float(
+            getattr(validation, "completeness_score", 0.0) or 0.0
+        ),
+        "warnings": list(getattr(validation, "warnings", []) or []),
+        "errors": list(getattr(validation, "errors", []) or []),
+        "missing_fields": list(getattr(validation, "missing_fields", []) or []),
+        "field_evidence": dict(getattr(validation, "field_evidence", {}) or {}),
+        "field_incomplete_reason": str(
+            getattr(validation, "field_incomplete_reason", "") or ""
+        ),
+    }
+
+
 def _update_monitor_result(
     *,
     task_store,
@@ -514,16 +534,7 @@ def run_extraction(
                 saved_data = result.data.model_dump() if result.data else {}
                 validation = getattr(result, "validation", None)
                 if validation is not None:
-                    saved_data["_validation"] = {
-                        "status": getattr(validation, "status", "full_success"),
-                        "is_valid": bool(getattr(validation, "is_valid", True)),
-                        "quality_score": float(getattr(validation, "quality_score", 0.0) or 0.0),
-                        "completeness_score": float(
-                            getattr(validation, "completeness_score", 0.0) or 0.0
-                        ),
-                        "warnings": list(getattr(validation, "warnings", []) or []),
-                        "errors": list(getattr(validation, "errors", []) or []),
-                    }
+                    saved_data["_validation"] = _build_validation_payload(validation)
                 extractor_stats = getattr(result, "extractor_stats", {}) or {}
                 if extractor_stats:
                     saved_data["_extractor_stats"] = dict(extractor_stats)
@@ -624,20 +635,24 @@ def run_extraction(
                 )
                 return
 
+            failure_data = {
+                "_runtime_metrics": _build_fetch_runtime_metrics(
+                    fetch_result=getattr(result, "fetch_result", None),
+                    use_static=use_static,
+                    elapsed_ms=elapsed_ms,
+                    cleaned_text=str(getattr(result, "cleaned_text", "") or ""),
+                ),
+                "failure_category": str(result.error or ""),
+            }
+            validation_payload = _build_validation_payload(getattr(result, "validation", None))
+            if validation_payload:
+                failure_data["_validation"] = validation_payload
             _call_with_optional_tenant(
                 task_store.mark_failed,
                 task.task_id,
                 elapsed_ms=elapsed_ms,
                 error=result.error or "未知错误",
-                data={
-                    "_runtime_metrics": _build_fetch_runtime_metrics(
-                        fetch_result=getattr(result, "fetch_result", None),
-                        use_static=use_static,
-                        elapsed_ms=elapsed_ms,
-                        cleaned_text=str(getattr(result, "cleaned_text", "") or ""),
-                    ),
-                    "failure_category": str(result.error or ""),
-                },
+                data=failure_data,
                 tenant_id=task_tenant_id,
             )
             _update_monitor_result(

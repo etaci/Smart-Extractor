@@ -2,6 +2,7 @@ from smart_extractor.config import FetcherConfig
 from smart_extractor.fetcher.base import FetchResult
 from smart_extractor.fetcher.url_preflight import URLPreflightResult
 from smart_extractor.fetcher.static import StaticFetcher
+import httpx
 
 
 def test_static_fetcher_escalates_retryable_result_to_dynamic(monkeypatch):
@@ -87,3 +88,66 @@ def test_static_fetcher_aborts_unreachable_url_after_preflight(monkeypatch):
     assert result.status_code == 404
     assert result.error == "unreachable_url: http_404"
     assert result.headers["x-smart-url-preflight"] == "unreachable"
+
+
+def test_static_fetcher_retries_decode_failure_with_identity_encoding(monkeypatch):
+    fetcher = StaticFetcher(FetcherConfig(url_preflight_enabled=False))
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, headers):
+            self.calls.append(dict(headers))
+            if len(self.calls) == 1:
+                raise httpx.DecodingError("broken br")
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", url),
+                content=b"<html><body>ok</body></html>",
+                headers={"content-type": "text/html"},
+            )
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(fetcher, "_ensure_client", lambda proxy_url=None: fake_client)
+
+    result = fetcher.fetch("https://example.com")
+
+    assert result.is_success is True
+    assert fake_client.calls[1]["Accept-Encoding"] == "identity"
+    assert result.diagnostics["failure_reason"].startswith("decode_retry")
+
+
+def test_static_fetcher_uses_rss_fallback_for_shell_page(monkeypatch):
+    fetcher = StaticFetcher(FetcherConfig(url_preflight_enabled=False, static_fallback_to_dynamic=False))
+
+    class FakeClient:
+        def get(self, url, headers):
+            if str(url).endswith("/article/widget"):
+                return httpx.Response(
+                    200,
+                    request=httpx.Request("GET", url),
+                    content=b"<html><body>Loading</body></html>",
+                    headers={"content-type": "text/html"},
+                )
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", url),
+                content=(
+                    "<rss><channel><item>"
+                    "<title>Widget News</title>"
+                    "<link>https://example.com/article/widget</link>"
+                    "<description>Real article body</description>"
+                    "</item></channel></rss>"
+                ).encode("utf-8"),
+                headers={"content-type": "application/rss+xml"},
+            )
+
+    monkeypatch.setattr(fetcher, "_ensure_client", lambda proxy_url=None: FakeClient())
+
+    result = fetcher.fetch("https://example.com/article/widget")
+
+    assert result.is_success is True
+    assert "Widget News" in result.html
+    assert result.headers["x-smart-fetch-rescue"] == "rss_fallback"
+    assert result.diagnostics["failure_reason"] == "rss_fallback"

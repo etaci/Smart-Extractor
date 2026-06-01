@@ -80,7 +80,19 @@ def _normalize_value(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         value = next((item for item in value if item not in (None, "", [], {})), "")
     if isinstance(value, dict):
-        value = value.get("name") or value.get("@id") or value.get("url") or ""
+        value = (
+            value.get("name")
+            or value.get("title")
+            or value.get("text")
+            or value.get("label")
+            or value.get("displayName")
+            or value.get("locationsText")
+            or value.get("addressLocality")
+            or value.get("addressRegion")
+            or value.get("@id")
+            or value.get("url")
+            or ""
+        )
     text = re.sub(r"\s+", " ", str(value).strip())
     if not text:
         return ""
@@ -155,6 +167,12 @@ def _iter_hydration_payloads(soup: BeautifulSoup) -> list[Any]:
             if parsed is not None:
                 payloads.append(parsed)
             continue
+        script_type = str(script.get("type") or "").strip().lower()
+        if script_type in {"application/json", "application/ld+json+raw"}:
+            parsed = _safe_json_loads(raw)
+            if parsed is not None:
+                payloads.append(parsed)
+            continue
         if str(script.get("id") or "").strip() == "__NEXT_DATA__":
             parsed = _safe_json_loads(raw)
             if parsed is not None:
@@ -178,6 +196,20 @@ def _iter_hydration_payloads(soup: BeautifulSoup) -> list[Any]:
                 "BigCommerce",
                 "__SFCC",
                 "variants",
+                "greenhouse",
+                "lever",
+                "ashby",
+                "workday",
+                "smartrecruiters",
+                "jobPostingTitle",
+                "jobRequisitionId",
+                "externalPath",
+                "locationsText",
+                "requisitionId",
+                "refNumber",
+                "opening",
+                "jobPosting",
+                "jobReqId",
             )
         ):
             continue
@@ -193,6 +225,14 @@ def _iter_hydration_payloads(soup: BeautifulSoup) -> list[Any]:
             "window.Shopify",
             "BigCommerce",
             "__SFCC",
+            "window.__JOB_DATA__",
+            "window.__INITIAL_JOB__",
+            "window.__CAREERS_DATA__",
+            "window.__JOB_POSTING__",
+            "window.__ASHBY_DATA__",
+            "window.__GREENHOUSE_DATA__",
+            "window.__LEVER_DATA__",
+            "jobPosting",
         ):
             for candidate in _extract_json_assignments(raw, marker):
                 parsed = _safe_json_loads(candidate)
@@ -339,6 +379,10 @@ def _extract_hydration_hints(payload: Any) -> dict[str, str]:
             continue
         normalized_keys = {str(key).strip().lower(): key for key in item.keys()}
         item_type = _json_type(item)
+        authoritative_job_payload = any(
+            key in normalized_keys
+            for key in ("jobpostingtitle", "jobrequisitionid", "locationstext")
+        )
         if _type_matches(
             item_type,
             {
@@ -356,7 +400,11 @@ def _extract_hydration_hints(payload: Any) -> dict[str, str]:
         ):
             _merge_hints(hints, _extract_json_ld_hints(item))
 
-        name_value = _first_key_value(item, normalized_keys, ("name", "productname", "title"))
+        name_value = _first_key_value(
+            item,
+            normalized_keys,
+            ("name", "productname", "title", "jobpostingtitle", "text"),
+        )
         if name_value:
             product_like = _type_matches(item_type, {"product", "offer"}) or any(
                 key in normalized_keys
@@ -365,6 +413,8 @@ def _extract_hydration_hints(payload: Any) -> dict[str, str]:
             if product_like:
                 hints.setdefault("name", name_value)
                 hints.setdefault("product", name_value)
+            elif authoritative_job_payload:
+                hints["title"] = name_value
             else:
                 hints.setdefault("title", name_value)
 
@@ -416,13 +466,71 @@ def _extract_hydration_hints(payload: Any) -> dict[str, str]:
         company = _first_key_value(
             item,
             normalized_keys,
-            ("company", "companyname", "hiringorganization", "organization"),
+            ("company", "companyname", "hiringorganization", "organization", "department", "office"),
         )
+        if not company and isinstance(item.get("company"), dict):
+            company = _normalize_value(item.get("company"))
+        if not company and isinstance(item.get("hiringOrganization"), dict):
+            company = _normalize_value(item.get("hiringOrganization"))
         if company:
             hints.setdefault("company", _normalize_value(company))
-        location = _first_key_value(item, normalized_keys, ("location", "joblocation", "address"))
+        location = _first_key_value(
+            item,
+            normalized_keys,
+            (
+                "location",
+                "joblocation",
+                "address",
+                "worklocation",
+                "primarylocation",
+                "locations",
+                "locationstext",
+            ),
+        )
+        if not location and isinstance(item.get("categories"), dict):
+            location = _normalize_value(item.get("categories", {}).get("location"))
+        if not location and isinstance(item.get("offices"), list):
+            location = _normalize_value(item.get("offices"))
+        if not location and isinstance(item.get("location"), dict):
+            location = _normalize_value(item.get("location"))
+        if not location and isinstance(item.get("locations"), list):
+            location = _normalize_value(item.get("locations"))
         if location:
-            hints.setdefault("location", _normalize_value(location))
+            if authoritative_job_payload:
+                hints["location"] = _normalize_value(location)
+            else:
+                hints.setdefault("location", _normalize_value(location))
+        employment_type = _first_key_value(
+            item,
+            normalized_keys,
+            ("employmenttype", "commitment", "jobtype", "type", "employment", "worktype"),
+        )
+        if not employment_type and isinstance(item.get("categories"), dict):
+            employment_type = _normalize_value(
+                item.get("categories", {}).get("commitment")
+                or item.get("categories", {}).get("employmentType")
+            )
+        if employment_type:
+            hints.setdefault("employment_type", employment_type)
+        req_id = _first_key_value(
+            item,
+            normalized_keys,
+            (
+                "requisitionid",
+                "jobrequisitionid",
+                "jobreqid",
+                "reqid",
+                "refnumber",
+                "jobid",
+                "externalpath",
+                "id",
+            ),
+        )
+        if req_id:
+            if authoritative_job_payload:
+                hints["job_id"] = req_id
+            else:
+                hints.setdefault("job_id", req_id)
         publish_date = _first_key_value(
             item,
             normalized_keys,
@@ -443,9 +551,18 @@ def _extract_hydration_hints(payload: Any) -> dict[str, str]:
         )
         if policy_number:
             hints.setdefault("policy_number", _normalize_value(policy_number))
-        content = _first_key_value(item, normalized_keys, ("articlebody", "body", "content", "text"))
+        content = _first_key_value(
+            item,
+            normalized_keys,
+            ("articlebody", "body", "content", "text", "description", "jobdescription"),
+        )
         if content:
-            hints.setdefault("content", content)
+            if authoritative_job_payload:
+                hints["content"] = content
+                hints["requirements"] = content
+            else:
+                hints.setdefault("content", content)
+                hints.setdefault("requirements", content)
         availability = _first_key_value(item, normalized_keys, ("availability", "stock", "inventory"))
         if not availability and isinstance(item.get("variants"), list):
             for variant in item.get("variants") or []:

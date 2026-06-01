@@ -421,6 +421,7 @@ class PlaywrightFetcher(BaseFetcher):
         stage: str,
         reason: str,
         status_code: int = 0,
+        original_url: str = "",
         final_url: str = "",
         headers: dict[str, str] | None = None,
         body_size: int = 0,
@@ -432,6 +433,7 @@ class PlaywrightFetcher(BaseFetcher):
             "failure_stage": stage,
             "failure_reason": reason,
             "http_status": int(status_code or 0),
+            "original_url": original_url,
             "final_url": final_url,
             "redirect_chain": list(redirect_chain or []),
             "content_type": str((headers or {}).get("content-type") or ""),
@@ -506,8 +508,6 @@ class PlaywrightFetcher(BaseFetcher):
     @staticmethod
     def _attach_json_capture(page: Page, captured_json: list[dict[str, str]]) -> None:
         def handle_response(response) -> None:
-            if len(captured_json) >= 6:
-                return
             try:
                 headers = response.headers or {}
                 content_type = str(headers.get("content-type") or "").lower()
@@ -520,12 +520,33 @@ class PlaywrightFetcher(BaseFetcher):
                 parsed = json.loads(text)
                 if not isinstance(parsed, (dict, list)):
                     return
-                captured_json.append(
-                    {
-                        "url": request_url[:240],
-                        "text": json.dumps(parsed, ensure_ascii=False)[:8000],
-                    }
+                lowered_url = request_url.lower()
+                priority = any(
+                    marker in lowered_url
+                    for marker in (
+                        "api",
+                        "graphql",
+                        "product",
+                        "price",
+                        "pricing",
+                        "job",
+                        "career",
+                        "posting",
+                        "search",
+                        "announcement",
+                        "notice",
+                    )
                 )
+                item = {
+                    "url": request_url[:240],
+                    "text": json.dumps(parsed, ensure_ascii=False)[:8000],
+                    "priority": "1" if priority else "0",
+                }
+                if priority:
+                    captured_json.insert(0, item)
+                    del captured_json[8:]
+                elif len(captured_json) < 8:
+                    captured_json.append(item)
             except Exception:
                 return
 
@@ -619,6 +640,7 @@ class PlaywrightFetcher(BaseFetcher):
                             stage="render",
                             reason=early_assessment.reason or "challenge_page",
                             status_code=status_code,
+                            original_url=url,
                             final_url=url,
                             headers=headers,
                             body_size=len(html or ""),
@@ -627,7 +649,15 @@ class PlaywrightFetcher(BaseFetcher):
                         ),
                     ), early_assessment
             try:
-                page.wait_for_load_state("networkidle", timeout=min(self._config.timeout, 5000))
+                network_idle_timeout = max(
+                    0,
+                    min(
+                        int(getattr(self._config, "network_idle_timeout_ms", 2500) or 0),
+                        self._config.timeout,
+                    ),
+                )
+                if network_idle_timeout:
+                    page.wait_for_load_state("networkidle", timeout=network_idle_timeout)
             except Exception:
                 pass
 
@@ -694,6 +724,7 @@ class PlaywrightFetcher(BaseFetcher):
                     stage="render",
                     reason=assessment.reason or "",
                     status_code=status_code,
+                    original_url=url,
                     final_url=url,
                     headers=headers,
                     body_size=len(html or ""),
@@ -782,6 +813,7 @@ class PlaywrightFetcher(BaseFetcher):
             preflight_headers = {
                 "x-smart-url-preflight": "ok" if preflight.reachable else "unreachable",
                 "x-smart-url-preflight-reason": preflight.reason,
+                "x-smart-url-preflight-repair-reason": preflight.repair_reason,
                 "x-smart-final-url": preflight.final_url,
                 "x-smart-canonical-url": preflight.canonical_url,
             }
@@ -799,6 +831,7 @@ class PlaywrightFetcher(BaseFetcher):
                         stage="preflight",
                         reason=preflight.reason,
                         status_code=preflight.status_code,
+                        original_url=preflight.original_url,
                         final_url=preflight.final_url,
                         headers=preflight.headers,
                         redirect_chain=preflight.redirect_chain,

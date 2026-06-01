@@ -337,6 +337,19 @@ def build_access_attempts(
             fallback_no += 1
             if fallback_no > max_attempts + max(len(proxy_candidates), 2):
                 break
+    else:
+        fallback_no = len(attempts) + 1
+        for proxy_url in proxy_candidates:
+            add_attempt(
+                fallback_no,
+                "static",
+                proxy_url,
+                "mobile_ua_fallback",
+                mobile_user_agent=True,
+            )
+            fallback_no += 1
+            if fallback_no > max_attempts + max(len(proxy_candidates), 2):
+                break
 
     if prefer_dynamic and bool(getattr(config, "challenge_fallback_to_static", True)):
         fallback_no = len(attempts) + 1

@@ -20,6 +20,9 @@ class ValidationResult:
         self.status = "full_success"
         self.warnings: list[str] = []
         self.errors: list[str] = []
+        self.missing_fields: list[str] = []
+        self.field_evidence: dict[str, list[str]] = {}
+        self.field_incomplete_reason: str = ""
         self.completeness_score: float = 0.0
         self.quality_score: float = 0.0
 
@@ -30,6 +33,14 @@ class ValidationResult:
         self.errors.append(msg)
         self.is_valid = False
         self.status = "failed"
+
+    def add_missing_field(self, field_name: str) -> None:
+        normalized = str(field_name or "").strip()
+        if normalized and normalized not in self.missing_fields:
+            self.missing_fields.append(normalized)
+        if self.status == "full_success":
+            self.status = "partial_success"
+        self.field_incomplete_reason = self.field_incomplete_reason or "field_missing"
 
     @property
     def summary(self) -> str:
@@ -70,6 +81,8 @@ class DataValidator:
     ) -> ValidationResult:
         result = ValidationResult()
         result.completeness_score = data.completeness_score()
+        if isinstance(data, DynamicExtractResult):
+            result.field_evidence = self._resolve_field_evidence(data)
 
         if isinstance(data, DynamicExtractResult) and self._has_any_dynamic_value(data):
             if result.completeness_score < 0.5:
@@ -83,6 +96,7 @@ class DataValidator:
 
         resolved_required = required_fields or self._resolve_required_fields(data)
         self._validate_required_fields(data, result, resolved_required)
+        self._record_dynamic_missing_fields(data, result)
         self._validate_formats(data, result)
         result.quality_score = self._calculate_quality_score(result)
 
@@ -114,6 +128,7 @@ class DataValidator:
             has_any_value = self._has_any_dynamic_value(data)
             for field_name in required_fields:
                 if payload.get(field_name) in (None, "", [], {}):
+                    result.add_missing_field(field_name)
                     if has_any_value:
                         result.status = "partial_success"
                         result.add_warning(f"关键字段 '{field_name}' 为空")
@@ -125,6 +140,48 @@ class DataValidator:
             value = getattr(data, field_name, None)
             if value in (None, "", [], {}):
                 result.add_error(f"关键字段 '{field_name}' 为空")
+
+    def _record_dynamic_missing_fields(
+        self,
+        data: BaseExtractModel,
+        result: ValidationResult,
+    ) -> None:
+        if not isinstance(data, DynamicExtractResult):
+            return
+        fields = list(data.selected_fields or data.candidate_fields or [])
+        if not fields:
+            return
+        for field_name in fields:
+            if (data.data or {}).get(field_name) in (None, "", [], {}):
+                result.add_missing_field(field_name)
+        if result.missing_fields:
+            result.status = "partial_success" if result.is_valid else result.status
+            result.field_incomplete_reason = (
+                result.field_incomplete_reason or "selected_field_missing"
+            )
+            for field_name in result.missing_fields:
+                result.field_evidence.setdefault(field_name, [])
+
+    @staticmethod
+    def _resolve_field_evidence(data: DynamicExtractResult) -> dict[str, list[str]]:
+        details = data.strategy_details if isinstance(data.strategy_details, dict) else {}
+        raw = details.get("field_evidence") or {}
+        evidence: dict[str, list[str]] = {}
+        if not isinstance(raw, dict):
+            return evidence
+        for field_name, values in raw.items():
+            if isinstance(values, list):
+                normalized_values = [
+                    str(item).strip()[:240]
+                    for item in values
+                    if str(item).strip()
+                ]
+            elif values in (None, "", [], {}):
+                normalized_values = []
+            else:
+                normalized_values = [str(values).strip()[:240]]
+            evidence[str(field_name)] = normalized_values[:5]
+        return evidence
 
     def _validate_formats(self, data: BaseExtractModel, result: ValidationResult) -> None:
         values = data.data if isinstance(data, DynamicExtractResult) else data.model_dump()

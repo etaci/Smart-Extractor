@@ -20,6 +20,7 @@ class URLPreflightResult:
     canonical_url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
     redirect_chain: list[str] = field(default_factory=list)
+    repair_reason: str = ""
 
     @property
     def target_url(self) -> str:
@@ -61,7 +62,11 @@ def preflight_url(
                     response.text,
                     base_url=result.final_url,
                 ) or _extract_og_url(response.text, base_url=result.final_url)
-                if canonical_from_error and canonical_from_error != normalized_url:
+                if (
+                    canonical_from_error
+                    and canonical_from_error != normalized_url
+                    and _is_safe_repair_candidate(normalized_url, canonical_from_error)
+                ):
                     canonical_response = _head_or_probe_get(client, canonical_from_error, request_headers)
                     if 200 <= int(canonical_response.status_code or 0) < 400:
                         result.status_code = int(canonical_response.status_code or 0)
@@ -73,13 +78,14 @@ def preflight_url(
                         }
                         result.redirect_chain = [normalized_url, result.final_url]
                         result.reason = "canonical_fallback"
+                        result.repair_reason = "canonical_fallback"
                         return result
                 repaired = (
                     _resolve_sitemap_fallback(client, normalized_url, request_headers)
                     if sitemap_fallback_enabled
                     else ""
                 )
-                if repaired:
+                if repaired and _is_safe_repair_candidate(normalized_url, repaired):
                     repaired_response = _head_or_probe_get(client, repaired, request_headers)
                     result.status_code = int(repaired_response.status_code or 0)
                     result.final_url = str(repaired_response.url)
@@ -93,6 +99,7 @@ def preflight_url(
                             base_url=result.final_url,
                         )
                         result.reason = "sitemap_fallback"
+                        result.repair_reason = "sitemap_fallback"
                         return result
                 variant = _resolve_url_variant(client, normalized_url, request_headers)
                 if variant:
@@ -106,6 +113,7 @@ def preflight_url(
                         }
                         result.redirect_chain = [normalized_url, result.final_url]
                         result.reason = "url_variant_fallback"
+                        result.repair_reason = "url_variant_fallback"
                         return result
                 result.reachable = False
                 result.reason = f"http_{result.status_code}"
@@ -115,10 +123,14 @@ def preflight_url(
                 result.reason = "empty_response"
                 return result
             if 200 <= result.status_code < 400:
-                result.canonical_url = _extract_canonical_url(
+                canonical_url = _extract_canonical_url(
                     response.text,
                     base_url=result.final_url,
                 )
+                if canonical_url and _is_safe_repair_candidate(normalized_url, canonical_url):
+                    result.canonical_url = canonical_url
+                elif canonical_url:
+                    result.headers["x-smart-canonical-rejected"] = canonical_url
             return result
     except httpx.UnsupportedProtocol:
         result.reachable = False
@@ -264,6 +276,34 @@ def _iter_url_variants(url: str) -> list[str]:
             seen.add(variant)
             ordered.append(variant)
     return ordered
+
+
+def _is_safe_repair_candidate(original_url: str, candidate_url: str) -> bool:
+    original = urlsplit(str(original_url or ""))
+    candidate = urlsplit(str(candidate_url or ""))
+    if not candidate.scheme or not candidate.netloc:
+        return False
+    original_host = (original.hostname or "").lower().removeprefix("www.")
+    candidate_host = (candidate.hostname or "").lower().removeprefix("www.")
+    if original_host and candidate_host and original_host != candidate_host:
+        return False
+    original_slug = PathLikeSlug(original.path).lower()
+    candidate_slug = PathLikeSlug(candidate.path).lower()
+    if original_slug and candidate_slug == original_slug:
+        return True
+    original_tokens = _path_tokens(original.path)
+    candidate_tokens = _path_tokens(candidate.path)
+    if original_tokens and len(original_tokens & candidate_tokens) >= min(2, len(original_tokens)):
+        return True
+    return False
+
+
+def _path_tokens(path: str) -> set[str]:
+    return {
+        token.lower()
+        for token in re.split(r"[^A-Za-z0-9]+", str(path or ""))
+        if len(token) >= 3
+    }
 
 
 def PathLikeSlug(path: str) -> str:

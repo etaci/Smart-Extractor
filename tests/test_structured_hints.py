@@ -123,6 +123,74 @@ def test_structured_hints_extracts_shopify_product_variants():
     assert "availability: True" in hints
 
 
+def test_structured_hints_extracts_common_ats_job_payloads():
+    html = """
+    <html><head>
+      <script type="application/json">
+      {
+        "jobPosting": {
+          "title": "Staff Backend Engineer",
+          "company": {"name": "Acme AI"},
+          "categories": {"location": "Remote"},
+          "commitment": "Full-time",
+          "jobReqId": "REQ-42",
+          "description": "Build extraction systems"
+        }
+      }
+      </script>
+    </head><body></body></html>
+    """
+
+    hints = build_structured_hints(
+        html,
+        selected_fields=["title", "company", "location", "employment_type", "job_id", "requirements"],
+    )
+
+    assert "title: Staff Backend Engineer" in hints
+    assert "company: Acme AI" in hints
+    assert "location: Remote" in hints
+    assert "employment_type: Full-time" in hints
+    assert "job_id: REQ-42" in hints
+    assert "requirements: Build extraction systems" in hints
+
+
+def test_structured_hints_extracts_workday_lever_style_job_payloads():
+    html = """
+    <html><head>
+      <script type="application/json">
+      {
+        "posting": {
+          "jobPostingTitle": "Principal Data Engineer",
+          "locationsText": "Berlin, Germany",
+          "jobRequisitionId": "WD-9001",
+          "externalPath": "/jobs/principal-data-engineer",
+          "description": "Own reliable data products"
+        },
+        "lever": {
+          "text": "Platform Engineer",
+          "categories": {
+            "location": "Remote - US",
+            "commitment": "Full-time"
+          },
+          "id": "LEV-123"
+        }
+      }
+      </script>
+    </head><body></body></html>
+    """
+
+    hints = build_structured_hints(
+        html,
+        selected_fields=["title", "location", "job_id", "employment_type", "requirements"],
+    )
+
+    assert "title: Principal Data Engineer" in hints
+    assert "location: Berlin, Germany" in hints
+    assert "job_id: WD-9001" in hints
+    assert "employment_type: Full-time" in hints
+    assert "requirements: Own reliable data products" in hints
+
+
 def test_structured_hints_extracts_job_article_policy_and_captured_json():
     html = """
     <html><head>

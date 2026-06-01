@@ -388,6 +388,109 @@ class TestPipelineWithMock:
         assert "name: Structured Only Widget" in result.cleaned_text
         pipeline.close()
 
+    def test_pipeline_records_missing_fields_and_candidate_evidence(self, test_config):
+        html = """
+        <html><head>
+          <script type="application/ld+json">
+          {
+            "@context": "https://schema.org",
+            "@type": "Product",
+            "name": "Evidence Widget",
+            "offers": {"@type": "Offer", "price": "49", "priceCurrency": "USD"}
+          }
+          </script>
+        </head><body><main>Evidence Widget product page with enough text for extraction.</main></body></html>
+        """
+        mock_fetcher = MagicMock()
+        mock_fetcher.fetch.return_value = FetchResult(
+            url="https://example.com/product/evidence-widget",
+            html=html,
+            status_code=200,
+        )
+        mock_fetcher.close.return_value = None
+
+        pipeline = ExtractionPipeline(config=test_config, fetcher=mock_fetcher)
+        pipeline._learned_profile_store = MagicMock()
+        pipeline._learned_profile_store.find_best_match.return_value = None
+        pipeline._extractor = MagicMock()
+        pipeline._extractor.extract_dynamic.side_effect = [
+            DynamicExtractResult(
+                page_type="product",
+                candidate_fields=["name", "price", "stock"],
+                selected_fields=["name", "price", "stock"],
+                field_labels={"name": "Name", "price": "Price", "stock": "Stock"},
+                data={"name": "Evidence Widget", "price": "USD 49", "stock": ""},
+                formatted_text="Name: Evidence Widget\nPrice: USD 49",
+                extraction_strategy="llm",
+            ),
+            DynamicExtractResult(
+                page_type="product",
+                candidate_fields=["stock"],
+                selected_fields=["stock"],
+                data={"stock": ""},
+                extraction_strategy="llm",
+            ),
+        ]
+
+        result = pipeline.run(
+            url="https://example.com/product/evidence-widget",
+            schema_name="auto",
+            skip_storage=True,
+            selected_fields=["name", "price", "stock"],
+        )
+
+        assert result.success is True
+        assert result.validation is not None
+        assert result.validation.status == "partial_success"
+        assert result.validation.missing_fields == ["stock"]
+        assert result.validation.field_evidence["name"] == ["Evidence Widget"]
+        assert result.validation.field_evidence["price"] == ["USD 49"]
+        assert result.validation.field_evidence["stock"] == []
+        pipeline.close()
+
+    def test_pipeline_warns_when_preflight_repair_loses_page_type_evidence(self, test_config):
+        html = "<html><body><main>Choose your country before continuing.</main></body></html>"
+        mock_fetcher = MagicMock()
+        mock_fetcher.fetch.return_value = FetchResult(
+            url="https://shop.example.com/",
+            html=html,
+            status_code=200,
+            headers={"x-smart-url-preflight-repair-reason": "canonical_fallback"},
+            diagnostics={
+                "original_url": "https://shop.example.com/products/widget-1",
+                "final_url": "https://shop.example.com/",
+                "repair_reason": "canonical_fallback",
+            },
+        )
+        mock_fetcher.close.return_value = None
+
+        pipeline = ExtractionPipeline(config=test_config, fetcher=mock_fetcher)
+        pipeline._learned_profile_store = MagicMock()
+        pipeline._learned_profile_store.find_best_match.return_value = None
+        pipeline._extractor = MagicMock()
+        pipeline._extractor.extract_dynamic.return_value = DynamicExtractResult(
+            page_type="product",
+            candidate_fields=["name", "price"],
+            selected_fields=["name", "price"],
+            data={"name": "Choose your country", "price": ""},
+            extraction_strategy="llm",
+        )
+
+        result = pipeline.run(
+            url="https://shop.example.com/products/widget-1",
+            schema_name="auto",
+            skip_storage=True,
+            selected_fields=["name", "price"],
+        )
+
+        assert result.validation is not None
+        assert result.fetch_result is not None
+        assert result.fetch_result.diagnostics["page_type_mismatch"] is True
+        assert any("fetch_page_type_mismatch" in item for item in result.validation.warnings)
+        assert result.data is not None
+        assert result.data.strategy_details["fetch_diagnostics"]["page_type_mismatch"] is True
+        pipeline.close()
+
     def test_pipeline_schema_registry(self, test_config):
         """测试 Pipeline 的 Schema 注册表"""
         with patch("smart_extractor.pipeline.LLMExtractor"):

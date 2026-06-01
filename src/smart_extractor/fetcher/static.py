@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from loguru import logger
+from bs4 import BeautifulSoup
 
 from smart_extractor.config import FetcherConfig
 from smart_extractor.fetcher.base import BaseFetcher, FetchResult
@@ -64,8 +67,8 @@ class StaticFetcher(BaseFetcher):
         self._clients[key] = client
         return client
 
-    def _build_headers(self) -> dict[str, str]:
-        user_agent = self._config.user_agent or get_random_user_agent()
+    def _build_headers(self, *, mobile: bool = False) -> dict[str, str]:
+        user_agent = self._config.user_agent or get_random_user_agent(mobile=mobile)
         chrome_like = "Chrome/" in user_agent or "Edg/" in user_agent
         headers = {
             "User-Agent": user_agent,
@@ -85,11 +88,17 @@ class StaticFetcher(BaseFetcher):
             headers.update(
                 {
                     "sec-ch-ua": '"Chromium";v="131", "Google Chrome";v="131", "Not_A Brand";v="24"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
+                    "sec-ch-ua-mobile": "?1" if mobile else "?0",
+                    "sec-ch-ua-platform": '"Android"' if mobile else '"Windows"',
                 }
             )
         return headers
+
+    @staticmethod
+    def _identity_headers(headers: dict[str, str]) -> dict[str, str]:
+        updated = dict(headers)
+        updated["Accept-Encoding"] = "identity"
+        return updated
 
     def _build_diagnostics(
         self,
@@ -98,6 +107,7 @@ class StaticFetcher(BaseFetcher):
         reason: str,
         status_code: int = 0,
         final_url: str = "",
+        original_url: str = "",
         headers: dict[str, str] | None = None,
         body_size: int = 0,
         is_shell_page: bool = False,
@@ -109,6 +119,7 @@ class StaticFetcher(BaseFetcher):
             "failure_stage": stage,
             "failure_reason": reason,
             "http_status": int(status_code or 0),
+            "original_url": original_url,
             "final_url": final_url,
             "redirect_chain": list(redirect_chain or []),
             "content_type": content_type,
@@ -119,15 +130,101 @@ class StaticFetcher(BaseFetcher):
 
     @staticmethod
     def _read_response_text(response: httpx.Response) -> tuple[str, str]:
-        try:
-            return response.text, ""
-        except UnicodeError as exc:
+        content = response.content or b""
+        if not content:
+            return "", ""
+        encodings: list[str] = []
+        if response.encoding:
+            encodings.append(str(response.encoding))
+        content_type = str(response.headers.get("content-type") or "")
+        match = re.search(r"charset=([A-Za-z0-9_.-]+)", content_type, re.I)
+        if match:
+            encodings.append(match.group(1))
+        encodings.extend(["utf-8", "utf-8-sig", "gb18030", "big5", "latin-1"])
+        seen: set[str] = set()
+        first_error = ""
+        for encoding in encodings:
+            normalized = encoding.strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
             try:
-                return response.content.decode("utf-8", errors="replace"), f"decode_error: {type(exc).__name__}"
-            except Exception:
-                return "", f"decode_error: {type(exc).__name__}"
+                text = content.decode(encoding)
+            except UnicodeError as exc:
+                first_error = first_error or f"decode_error: {type(exc).__name__}"
+                continue
+            replacement_ratio = text.count("\ufffd") / max(len(text), 1)
+            if replacement_ratio <= 0.01:
+                return text, "" if not first_error else f"decode_recovered:{encoding}"
+        try:
+            import charset_normalizer
+
+            detected = charset_normalizer.from_bytes(content).best()
+            if detected is not None:
+                return str(detected), "decode_recovered:charset_normalizer"
+        except Exception:
+            pass
+        try:
+            return content.decode("utf-8", errors="replace"), first_error or "decode_error: fallback_replace"
         except Exception as exc:
             return "", f"decode_error: {type(exc).__name__}: {exc}"
+
+    def _get_with_decode_fallback(
+        self,
+        client: httpx.Client,
+        url: str,
+        headers: dict[str, str],
+    ) -> tuple[httpx.Response, str]:
+        try:
+            return client.get(url, headers=headers), ""
+        except (httpx.DecodingError, UnicodeError) as exc:
+            logger.warning("StaticFetcher decode failed, retrying with identity encoding: {}", exc)
+            response = client.get(url, headers=self._identity_headers(headers))
+            return response, f"decode_retry: {type(exc).__name__}"
+
+    def _fetch_rss_fallback(self, url: str, previous: FetchResult | None) -> FetchResult | None:
+        parts = urlsplit(url)
+        if not parts.scheme or not parts.netloc:
+            return None
+        slug = _path_slug(parts.path)
+        if not slug:
+            return None
+        client = self._ensure_client()
+        headers = self._build_headers()
+        for feed_path in ("/feed", "/rss", "/rss.xml", "/atom.xml"):
+            feed_url = urlunsplit((parts.scheme, parts.netloc, feed_path, "", ""))
+            try:
+                response, _ = self._get_with_decode_fallback(client, feed_url, headers)
+            except Exception:
+                continue
+            if response.status_code >= 400:
+                continue
+            html = _extract_feed_item_html(response.text, slug)
+            if not html:
+                continue
+            diagnostics = self._build_diagnostics(
+                stage="feed_fallback",
+                reason="rss_fallback",
+                status_code=response.status_code,
+                final_url=feed_url,
+                headers=dict(response.headers),
+                body_size=len(html),
+                retry_count=(previous.retry_count if previous else 0) + 1,
+            )
+            return FetchResult(
+                url=url,
+                html=html,
+                status_code=200,
+                headers={
+                    **dict(response.headers),
+                    "x-smart-fetch-rescue": "rss_fallback",
+                    "x-smart-final-url": feed_url,
+                },
+                elapsed_ms=previous.elapsed_ms if previous else 0.0,
+                retry_count=(previous.retry_count if previous else 0) + 1,
+                diagnostics=diagnostics,
+            )
+        return None
 
     def _should_escalate_to_dynamic(self, result: FetchResult | None) -> bool:
         if not bool(getattr(self._config, "static_fallback_to_dynamic", True)):
@@ -197,6 +294,7 @@ class StaticFetcher(BaseFetcher):
                         **preflight.headers,
                         "x-smart-url-preflight": "unreachable",
                         "x-smart-url-preflight-reason": preflight.reason,
+                        "x-smart-url-preflight-repair-reason": preflight.repair_reason,
                         "x-smart-final-url": preflight.final_url,
                     },
                     error=f"unreachable_url: {preflight.reason}",
@@ -206,6 +304,7 @@ class StaticFetcher(BaseFetcher):
                         reason=preflight.reason,
                         status_code=preflight.status_code,
                         final_url=preflight.final_url,
+                        original_url=preflight.original_url,
                         headers=preflight.headers,
                         redirect_chain=preflight.redirect_chain,
                     ),
@@ -226,15 +325,21 @@ class StaticFetcher(BaseFetcher):
             )
             try:
                 client = self._ensure_client(attempt.proxy_url or None)
-                response = client.get(url, headers=self._build_headers())
+                request_headers = self._build_headers(mobile=bool(attempt.mobile_user_agent))
+                response, decode_retry = self._get_with_decode_fallback(client, url, request_headers)
                 html, decode_error = self._read_response_text(response)
+                decode_error = decode_error or decode_retry
                 headers = dict(response.headers)
+                if decode_error:
+                    headers["x-smart-decode-fallback"] = decode_error
                 headers.update(
                     {
                         "x-smart-url-preflight": "ok" if preflight else "skipped",
                         "x-smart-final-url": preflight.final_url if preflight else str(response.url),
                         "x-smart-canonical-url": preflight.canonical_url if preflight else "",
+                        "x-smart-url-preflight-repair-reason": preflight.repair_reason if preflight else "",
                         "x-smart-fetch-attempt-reason": attempt.reason,
+                        "x-smart-fetch-mobile-ua": "1" if attempt.mobile_user_agent else "0",
                         "x-smart-fetch-html-length": str(len(html or "")),
                     }
                 )
@@ -255,6 +360,7 @@ class StaticFetcher(BaseFetcher):
                         stage="fetch",
                         reason=assessment.reason or decode_error or "",
                         status_code=response.status_code,
+                        original_url=preflight.original_url if preflight else url,
                         final_url=str(response.url),
                         headers=headers,
                         body_size=len(html or ""),
@@ -271,6 +377,10 @@ class StaticFetcher(BaseFetcher):
                         assessment.reason or "retryable",
                     )
                     continue
+                if assessment.retryable:
+                    rss_result = self._fetch_rss_fallback(url, last_result)
+                    if rss_result is not None:
+                        return rss_result
                 if assessment.retryable and self._should_escalate_to_dynamic(last_result):
                     return self._fetch_dynamic_fallback(url, last_result)
                 return last_result
@@ -299,6 +409,9 @@ class StaticFetcher(BaseFetcher):
                 if assessment.retryable and attempt_index < len(attempts):
                     continue
                 if assessment.retryable and self._should_escalate_to_dynamic(last_result):
+                    rss_result = self._fetch_rss_fallback(url, last_result)
+                    if rss_result is not None:
+                        return rss_result
                     return self._fetch_dynamic_fallback(url, last_result)
                 return last_result
             finally:
@@ -310,6 +423,9 @@ class StaticFetcher(BaseFetcher):
                 )
 
         if self._should_escalate_to_dynamic(last_result):
+            rss_result = self._fetch_rss_fallback(url, last_result)
+            if rss_result is not None:
+                return rss_result
             return self._fetch_dynamic_fallback(url, last_result)
 
         return last_result or FetchResult(
@@ -326,3 +442,35 @@ class StaticFetcher(BaseFetcher):
             except Exception as exc:
                 logger.debug("关闭 httpx 客户端失败，已忽略: {}", exc)
         self._clients.clear()
+
+
+def _path_slug(path: str) -> str:
+    normalized = str(path or "").strip().rstrip("/")
+    return normalized.rsplit("/", 1)[-1].lower() if normalized else ""
+
+
+def _extract_feed_item_html(feed_text: str, slug: str) -> str:
+    if not feed_text or not slug:
+        return ""
+    try:
+        soup = BeautifulSoup(feed_text, "xml")
+    except Exception:
+        soup = BeautifulSoup(feed_text, "lxml")
+    for item in soup.find_all(["item", "entry"]):
+        link_node = item.find("link")
+        link = ""
+        if link_node is not None:
+            link = link_node.get("href") or link_node.get_text(" ", strip=True)
+        if slug not in str(link).lower():
+            continue
+        title = item.find("title")
+        summary = item.find("description") or item.find("summary") or item.find("content")
+        published = item.find("pubDate") or item.find("published") or item.find("updated")
+        parts = [
+            f"<h1>{title.get_text(' ', strip=True)}</h1>" if title else "",
+            f"<time>{published.get_text(' ', strip=True)}</time>" if published else "",
+            f"<article>{summary.get_text(' ', strip=True)}</article>" if summary else "",
+            f'<link rel="canonical" href="{link}">' if link else "",
+        ]
+        return "<html><body>" + "\n".join(part for part in parts if part) + "</body></html>"
+    return ""

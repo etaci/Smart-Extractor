@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import inspect
+import re
 import time
 from pathlib import Path
 from typing import Callable, Optional, Type
+from urllib.parse import urlsplit
 
 from loguru import logger
 
@@ -171,6 +173,12 @@ class ExtractionPipeline:
             fetch_result.html,
             selected_fields=selected_fields,
         )
+        self._annotate_page_type_consistency(
+            fetch_result,
+            requested_url=url,
+            structured_hints=structured_hints,
+            selected_fields=selected_fields or [],
+        )
         if self._looks_like_verification_page(base_cleaned_text):
             result.error = self.normalize_user_facing_error("目标站点返回安全验证页面，当前无法提取真实内容")
             return result
@@ -202,6 +210,12 @@ class ExtractionPipeline:
                 source_url=url,
                 selected_fields=selected_fields or [],
             )
+            self._attach_field_evidence(
+                extracted_data,
+                structured_hints=structured_hints,
+                selected_fields=selected_fields or [],
+            )
+            self._attach_fetch_diagnostics_to_result(extracted_data, fetch_result)
         else:
             if target_schema is None:
                 result.error = self.normalize_user_facing_error("Schema 未正确解析")
@@ -213,6 +227,7 @@ class ExtractionPipeline:
         result.meta = meta
         self._fire_hooks("after_extract", data=extracted_data, meta=meta)
         validation = self._validator.validate(extracted_data)
+        self._apply_fetch_validation_warnings(validation, fetch_result)
         result.validation = validation
         result.validation_status = getattr(validation, "status", "failed") or "failed"
         meta.confidence_score = validation.quality_score
@@ -302,6 +317,180 @@ class ExtractionPipeline:
         if cleaned_text.startswith(hints):
             return cleaned_text
         return f"{hints}\n\n{cleaned_text}"
+
+    @staticmethod
+    def _attach_field_evidence(
+        extracted_data: DynamicExtractResult,
+        *,
+        structured_hints: str,
+        selected_fields: list[str],
+    ) -> None:
+        evidence = ExtractionPipeline._extract_field_evidence(
+            structured_hints,
+            selected_fields=selected_fields or list(extracted_data.selected_fields or []),
+        )
+        details = extracted_data.strategy_details if isinstance(extracted_data.strategy_details, dict) else {}
+        existing = details.get("field_evidence") if isinstance(details.get("field_evidence"), dict) else {}
+        merged = {**existing}
+        for field_name, values in evidence.items():
+            bucket = list(merged.get(field_name) or [])
+            for value in values:
+                if value not in bucket:
+                    bucket.append(value)
+            merged[field_name] = bucket[:5]
+        if merged:
+            extracted_data.strategy_details = {**details, "field_evidence": merged}
+
+    @staticmethod
+    def _extract_field_evidence(
+        structured_hints: str,
+        *,
+        selected_fields: list[str],
+    ) -> dict[str, list[str]]:
+        fields = {str(field).strip().lower() for field in selected_fields if str(field).strip()}
+        evidence: dict[str, list[str]] = {field: [] for field in fields}
+        if not structured_hints:
+            return evidence
+        for raw_line in structured_hints.splitlines():
+            line = raw_line.strip()
+            if not line or ":" not in line:
+                continue
+            field_name, value = line.split(":", 1)
+            normalized_field = field_name.strip().lower().removesuffix("_candidates")
+            if fields and normalized_field not in fields:
+                continue
+            values = [item.strip()[:240] for item in value.split("|") if item.strip()]
+            if values:
+                evidence.setdefault(normalized_field, [])
+                for item in values:
+                    if item not in evidence[normalized_field]:
+                        evidence[normalized_field].append(item)
+        return evidence
+
+    @staticmethod
+    def _attach_fetch_diagnostics_to_result(
+        extracted_data: DynamicExtractResult,
+        fetch_result: FetchResult,
+    ) -> None:
+        diagnostics = fetch_result.diagnostics if isinstance(fetch_result.diagnostics, dict) else {}
+        if not diagnostics:
+            return
+        keys = (
+            "page_type_mismatch",
+            "page_type_mismatch_reason",
+            "original_url",
+            "final_url",
+            "repair_reason",
+        )
+        payload = {key: diagnostics.get(key) for key in keys if diagnostics.get(key) not in (None, "", [], {})}
+        if not payload:
+            return
+        details = extracted_data.strategy_details if isinstance(extracted_data.strategy_details, dict) else {}
+        extracted_data.strategy_details = {**details, "fetch_diagnostics": payload}
+
+    @staticmethod
+    def _apply_fetch_validation_warnings(
+        validation: ValidationResult,
+        fetch_result: FetchResult,
+    ) -> None:
+        diagnostics = fetch_result.diagnostics if isinstance(fetch_result.diagnostics, dict) else {}
+        if not diagnostics.get("page_type_mismatch"):
+            return
+        reason = str(diagnostics.get("page_type_mismatch_reason") or "page_type_mismatch")
+        validation.add_warning(f"fetch_page_type_mismatch: {reason}")
+        validation.quality_score = max(0.0, validation.quality_score - 0.05)
+
+    @staticmethod
+    def _annotate_page_type_consistency(
+        fetch_result: FetchResult,
+        *,
+        requested_url: str,
+        structured_hints: str,
+        selected_fields: list[str],
+    ) -> None:
+        diagnostics = fetch_result.diagnostics if isinstance(fetch_result.diagnostics, dict) else {}
+        if not diagnostics:
+            fetch_result.diagnostics = {}
+            diagnostics = fetch_result.diagnostics
+        original_url = str(diagnostics.get("original_url") or requested_url or fetch_result.url or "")
+        final_url = str(diagnostics.get("final_url") or fetch_result.headers.get("x-smart-final-url", "") if isinstance(fetch_result.headers, dict) else "")
+        final_url = final_url or str(fetch_result.url or requested_url or "")
+        expected_type = ExtractionPipeline._infer_expected_page_type(original_url, selected_fields)
+        if not expected_type:
+            return
+        hints_lower = structured_hints.lower()
+        evidence_fields = ExtractionPipeline._page_type_evidence_fields(expected_type)
+        has_type_evidence = any(re.search(rf"^{re.escape(field)}:", hints_lower, re.M) for field in evidence_fields)
+        final_parts = urlsplit(final_url)
+        path = (final_parts.path or "/").strip().lower()
+        suspicious_path = path in {"", "/"} or any(
+            marker in path
+            for marker in (
+                "/login",
+                "/signin",
+                "/account",
+                "/region",
+                "/locale",
+                "/country",
+                "/collections",
+                "/category",
+                "/categories",
+                "/search",
+            )
+        )
+        repair_reason = ""
+        if isinstance(fetch_result.headers, dict):
+            repair_reason = str(fetch_result.headers.get("x-smart-url-preflight-repair-reason") or "")
+        if not repair_reason:
+            repair_reason = str(diagnostics.get("repair_reason") or "")
+        original_host = (urlsplit(original_url).hostname or "").removeprefix("www.")
+        final_host = (final_parts.hostname or "").removeprefix("www.")
+        host_changed = bool(original_host and final_host and original_host != final_host)
+        if (suspicious_path or host_changed or repair_reason) and not has_type_evidence:
+            diagnostics.update(
+                {
+                    "page_type_mismatch": True,
+                    "page_type_mismatch_reason": (
+                        f"expected_{expected_type}_but_final_url_or_content_lacks_type_evidence"
+                    ),
+                    "expected_page_type": expected_type,
+                    "repair_reason": repair_reason,
+                    "original_url": original_url,
+                    "final_url": final_url,
+                }
+            )
+
+    @staticmethod
+    def _infer_expected_page_type(url: str, selected_fields: list[str]) -> str:
+        field_set = {str(field).strip().lower() for field in selected_fields if str(field).strip()}
+        path = urlsplit(str(url or "")).path.lower()
+        if field_set & {"price", "sku", "gtin", "availability", "brand", "stock"}:
+            return "product"
+        if field_set & {"plan", "billing_period", "seat_price", "monthly_price", "annual_price"}:
+            return "pricing"
+        if field_set & {"company", "location", "employment_type", "salary_range", "job_id"}:
+            return "job"
+        if field_set & {"agency", "policy_number", "document_date", "effective_date"}:
+            return "policy"
+        if any(marker in path for marker in ("/product", "/products", "/p/")):
+            return "product"
+        if any(marker in path for marker in ("/pricing", "/plans", "/price")):
+            return "pricing"
+        if any(marker in path for marker in ("/job", "/jobs", "/careers", "/positions")):
+            return "job"
+        if any(marker in path for marker in ("/policy", "/notice", "/announcement", "/press")):
+            return "policy"
+        return ""
+
+    @staticmethod
+    def _page_type_evidence_fields(page_type: str) -> tuple[str, ...]:
+        mapping = {
+            "product": ("name", "product", "price", "sku", "brand", "availability"),
+            "pricing": ("plan", "price", "billing_period"),
+            "job": ("title", "company", "location", "employment_type", "job_id"),
+            "policy": ("title", "agency", "policy_number", "publish_date", "content"),
+        }
+        return mapping.get(page_type, ())
 
     async def _fetch_async(self, url: str) -> FetchResult:
         import asyncio
