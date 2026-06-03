@@ -381,6 +381,7 @@ class ExtractionPipeline:
             "original_url",
             "final_url",
             "repair_reason",
+            "preflight_type_mismatch",
         )
         payload = {key: diagnostics.get(key) for key in keys if diagnostics.get(key) not in (None, "", [], {})}
         if not payload:
@@ -413,7 +414,14 @@ class ExtractionPipeline:
             fetch_result.diagnostics = {}
             diagnostics = fetch_result.diagnostics
         original_url = str(diagnostics.get("original_url") or requested_url or fetch_result.url or "")
-        final_url = str(diagnostics.get("final_url") or fetch_result.headers.get("x-smart-final-url", "") if isinstance(fetch_result.headers, dict) else "")
+        final_url = str(
+            diagnostics.get("final_url")
+            or (
+                fetch_result.headers.get("x-smart-final-url", "")
+                if isinstance(fetch_result.headers, dict)
+                else ""
+            )
+        )
         final_url = final_url or str(fetch_result.url or requested_url or "")
         expected_type = ExtractionPipeline._infer_expected_page_type(original_url, selected_fields)
         if not expected_type:
@@ -443,18 +451,25 @@ class ExtractionPipeline:
             repair_reason = str(fetch_result.headers.get("x-smart-url-preflight-repair-reason") or "")
         if not repair_reason:
             repair_reason = str(diagnostics.get("repair_reason") or "")
+        preflight_type_mismatch = ""
+        if isinstance(fetch_result.headers, dict):
+            preflight_type_mismatch = str(
+                fetch_result.headers.get("x-smart-preflight-type-mismatch") or ""
+            )
         original_host = (urlsplit(original_url).hostname or "").removeprefix("www.")
         final_host = (final_parts.hostname or "").removeprefix("www.")
         host_changed = bool(original_host and final_host and original_host != final_host)
-        if (suspicious_path or host_changed or repair_reason) and not has_type_evidence:
+        if (suspicious_path or host_changed or repair_reason or preflight_type_mismatch) and not has_type_evidence:
             diagnostics.update(
                 {
                     "page_type_mismatch": True,
                     "page_type_mismatch_reason": (
-                        f"expected_{expected_type}_but_final_url_or_content_lacks_type_evidence"
+                        preflight_type_mismatch
+                        or f"expected_{expected_type}_but_final_url_or_content_lacks_type_evidence"
                     ),
                     "expected_page_type": expected_type,
                     "repair_reason": repair_reason,
+                    "preflight_type_mismatch": preflight_type_mismatch,
                     "original_url": original_url,
                     "final_url": final_url,
                 }

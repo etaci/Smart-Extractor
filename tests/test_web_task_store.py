@@ -225,6 +225,8 @@ def test_task_store_classifies_fetcher_failures_for_metrics():
     assert classify("UnicodeDecodeError while reading body") == "decode_error"
     assert classify("unsupported_content: application/pdf") == "unsupported_content"
     assert classify("http_500 upstream") == "http_400_500"
+    assert classify("render body_size=0 final_url=https://example.com") == "empty_response"
+    assert classify("cloudflare shell_markers challenge_page") == "anti_bot_or_shell"
 
 
 def test_task_store_rejects_quota_overage_before_batch_creation(tmp_path):

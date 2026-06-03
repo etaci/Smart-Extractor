@@ -123,6 +123,40 @@ def test_structured_hints_extracts_shopify_product_variants():
     assert "availability: True" in hints
 
 
+def test_structured_hints_extracts_product_offer_hydration_fields():
+    html = """
+    <html><head>
+      <script>
+      window.__PRODUCT_DATA__ = {
+        "product": {
+          "productName": "Regional Widget",
+          "brand": {"name": "Acme"},
+          "sku": "SKU-123",
+          "gtin13": "0123456789012",
+          "offers": {
+            "price": "149.00",
+            "priceCurrency": "USD",
+            "availability": "https://schema.org/InStock"
+          }
+        }
+      };
+      </script>
+    </head><body></body></html>
+    """
+
+    hints = build_structured_hints(
+        html,
+        selected_fields=["name", "price", "brand", "sku", "gtin", "availability"],
+    )
+
+    assert "name: Regional Widget" in hints
+    assert "price: USD 149.00" in hints
+    assert "brand: Acme" in hints
+    assert "sku: SKU-123" in hints
+    assert "gtin: 0123456789012" in hints
+    assert "availability: InStock" in hints
+
+
 def test_structured_hints_extracts_common_ats_job_payloads():
     html = """
     <html><head>
@@ -189,6 +223,62 @@ def test_structured_hints_extracts_workday_lever_style_job_payloads():
     assert "job_id: WD-9001" in hints
     assert "employment_type: Full-time" in hints
     assert "requirements: Own reliable data products" in hints
+
+
+def test_structured_hints_extracts_icims_platform_and_job_page_kind():
+    html = """
+    <html><head>
+      <script>
+      window.__ICIMS_DATA__ = {
+        "jobs": [
+          {"jobTitle": "Backend Engineer", "jobNumber": "IC-1"},
+          {"jobTitle": "Data Engineer", "jobNumber": "IC-2"}
+        ],
+        "jobTitle": "Backend Engineer",
+        "jobNumber": "IC-1",
+        "locationsText": "Remote",
+        "description": "Build resilient crawlers"
+      };
+      </script>
+    </head><body></body></html>
+    """
+
+    hints = build_structured_hints(
+        html,
+        selected_fields=["title", "job_id", "location", "requirements", "ats_platform", "job_page_kind"],
+    )
+
+    assert "ats_platform: icims" in hints
+    assert "job_page_kind: detail" in hints
+    assert "title: Backend Engineer" in hints
+    assert "job_id: IC-1" in hints
+    assert "requirements: Build resilient crawlers" in hints
+
+
+def test_structured_hints_extracts_pricing_free_and_enterprise_tiers():
+    html = """
+    <html><head>
+      <script type="application/json">
+      {
+        "plans": [
+          {"planName": "Free", "price": "0", "currency": "USD", "billingPeriod": "month"},
+          {"planName": "Enterprise", "customPricing": "Contact sales"}
+        ]
+      }
+      </script>
+    </head><body></body></html>
+    """
+
+    hints = build_structured_hints(
+        html,
+        selected_fields=["plan", "price", "billing_period", "free_tier", "enterprise_tier"],
+    )
+
+    assert "plan: Free" in hints
+    assert "price: USD 0" in hints
+    assert "billing_period: month" in hints
+    assert "free_tier: Free" in hints
+    assert "enterprise_tier: Enterprise" in hints
 
 
 def test_structured_hints_extracts_job_article_policy_and_captured_json():

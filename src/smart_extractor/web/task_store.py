@@ -2932,9 +2932,16 @@ class SQLiteTaskStore:
             return ""
         if "empty_after_clean" in normalized:
             return "empty_after_clean"
+        if "body_size=0" in normalized:
+            return "empty_response"
         if "unsupported_content" in normalized or "unsupported content" in normalized:
             return "unsupported_content"
-        if "decode" in normalized or "encoding" in normalized or "unicode" in normalized:
+        if (
+            "decode" in normalized
+            or "encoding" in normalized
+            or "unicode" in normalized
+            or "charset" in normalized
+        ):
             return "decode_error"
         if "blocked_but_unclassified" in normalized:
             return "blocked_but_unclassified"
@@ -3024,6 +3031,12 @@ class SQLiteTaskStore:
                 data.get("failure_category"),
                 runtime.get("failure_reason"),
                 runtime.get("failure_stage"),
+                runtime.get("raw_error"),
+                f"http_status={runtime.get('http_status')}",
+                f"final_url={runtime.get('final_url')}",
+                f"body_size={runtime.get('body_size')}",
+                " ".join(str(item) for item in (runtime.get("shell_markers") or [])),
+                runtime.get("preflight_type_mismatch"),
             )
         )
         payload = {

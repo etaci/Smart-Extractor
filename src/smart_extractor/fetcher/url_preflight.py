@@ -57,6 +57,9 @@ def preflight_url(
             result.final_url = str(response.url)
             result.headers = dict(response.headers)
             result.redirect_chain = [str(item.url) for item in getattr(response, "history", [])] + [result.final_url]
+            if result.final_url != normalized_url and not result.repair_reason:
+                result.repair_reason = "redirect"
+            _apply_type_mismatch_header(result.headers, normalized_url, result.final_url, response.text)
             if result.status_code in {404, 410}:
                 canonical_from_error = _extract_canonical_url(
                     response.text,
@@ -76,6 +79,12 @@ def preflight_url(
                             **dict(canonical_response.headers),
                             "x-smart-url-preflight-repaired-from": normalized_url,
                         }
+                        _apply_type_mismatch_header(
+                            result.headers,
+                            normalized_url,
+                            result.final_url,
+                            canonical_response.text,
+                        )
                         result.redirect_chain = [normalized_url, result.final_url]
                         result.reason = "canonical_fallback"
                         result.repair_reason = "canonical_fallback"
@@ -93,6 +102,12 @@ def preflight_url(
                         **dict(repaired_response.headers),
                         "x-smart-url-preflight-repaired-from": normalized_url,
                     }
+                    _apply_type_mismatch_header(
+                        result.headers,
+                        normalized_url,
+                        result.final_url,
+                        repaired_response.text,
+                    )
                     if 200 <= result.status_code < 400:
                         result.canonical_url = _extract_canonical_url(
                             repaired_response.text,
@@ -111,6 +126,12 @@ def preflight_url(
                             **dict(variant_response.headers),
                             "x-smart-url-preflight-repaired-from": normalized_url,
                         }
+                        _apply_type_mismatch_header(
+                            result.headers,
+                            normalized_url,
+                            result.final_url,
+                            variant_response.text,
+                        )
                         result.redirect_chain = [normalized_url, result.final_url]
                         result.reason = "url_variant_fallback"
                         result.repair_reason = "url_variant_fallback"
@@ -296,6 +317,81 @@ def _is_safe_repair_candidate(original_url: str, candidate_url: str) -> bool:
     if original_tokens and len(original_tokens & candidate_tokens) >= min(2, len(original_tokens)):
         return True
     return False
+
+
+def _page_type_mismatch_reason(original_url: str, final_url: str, html: str = "") -> str:
+    intent = _infer_url_intent(original_url)
+    if not intent:
+        return ""
+    original = urlsplit(str(original_url or ""))
+    final = urlsplit(str(final_url or ""))
+    original_host = (original.hostname or "").lower().removeprefix("www.")
+    final_host = (final.hostname or "").lower().removeprefix("www.")
+    if original_host and final_host and original_host != final_host:
+        return f"{intent}_host_changed"
+    final_path = (final.path or "/").lower().rstrip("/") or "/"
+    suspicious_path = final_path == "/" or any(
+        marker in final_path
+        for marker in (
+            "/login",
+            "/signin",
+            "/account",
+            "/region",
+            "/locale",
+            "/country",
+            "/category",
+            "/categories",
+            "/collections",
+            "/search",
+        )
+    )
+    if not suspicious_path:
+        return ""
+    title = _extract_title_text(html).lower()
+    title_markers = {
+        "product": ("product", "price", "shop", "buy"),
+        "pricing": ("pricing", "plans", "price"),
+        "job": ("job", "career", "hiring", "position"),
+        "policy": ("policy", "notice", "announcement", "regulation"),
+    }.get(intent, ())
+    if title and any(marker in title for marker in title_markers):
+        return ""
+    return f"{intent}_redirected_to_generic_page"
+
+
+def _apply_type_mismatch_header(
+    headers: dict[str, str],
+    original_url: str,
+    final_url: str,
+    html: str = "",
+) -> None:
+    mismatch_reason = _page_type_mismatch_reason(original_url, final_url, html)
+    if mismatch_reason:
+        headers["x-smart-preflight-type-mismatch"] = mismatch_reason
+
+
+def _infer_url_intent(url: str) -> str:
+    path = urlsplit(str(url or "")).path.lower()
+    if any(marker in path for marker in ("/product", "/products", "/p/", "/shop/", "/item/")):
+        return "product"
+    if any(marker in path for marker in ("/pricing", "/plans", "/price")):
+        return "pricing"
+    if any(marker in path for marker in ("/job", "/jobs", "/careers", "/positions", "/openings")):
+        return "job"
+    if any(marker in path for marker in ("/policy", "/notice", "/announcement", "/press", "/regulation")):
+        return "policy"
+    return ""
+
+
+def _extract_title_text(html: str) -> str:
+    if not html:
+        return ""
+    try:
+        soup = BeautifulSoup(html[:120_000], "lxml")
+    except Exception:
+        return ""
+    title = soup.find("title")
+    return title.get_text(" ", strip=True) if title else ""
 
 
 def _path_tokens(path: str) -> set[str]:

@@ -15,7 +15,7 @@ from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_
 
 from smart_extractor.config import FetcherConfig
 from smart_extractor.fetcher.base import BaseFetcher, FetchResult
-from smart_extractor.fetcher.static import StaticFetcher
+from smart_extractor.fetcher.static import StaticFetcher, _detect_shell_markers, _diagnostic_headers
 from smart_extractor.fetcher.url_preflight import preflight_url
 from smart_extractor.utils.anti_detect import (
     AccessAttempt,
@@ -50,7 +50,11 @@ _CORE_CONTENT_SELECTORS = (
     "[data-testid*='product']",
     "[class*='product']",
     "[class*='price']",
+    "[class*='pricing']",
+    "[class*='plan']",
     "[class*='job']",
+    "[class*='article']",
+    "[class*='news']",
 )
 
 _ANTI_DETECT_SCRIPT = """
@@ -310,6 +314,20 @@ class PlaywrightFetcher(BaseFetcher):
             return
 
     @staticmethod
+    def _measure_dom_stability(page: Page) -> dict[str, int]:
+        try:
+            first = len(PlaywrightFetcher._extract_body_text(page))
+            page.wait_for_timeout(350)
+            second = len(PlaywrightFetcher._extract_body_text(page))
+            return {
+                "dom_text_length_before": first,
+                "dom_text_length_after": second,
+                "dom_text_length_delta": second - first,
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
     def _extract_reader_html(page: Page) -> str:
         try:
             blocks = page.evaluate(
@@ -318,7 +336,8 @@ class PlaywrightFetcher(BaseFetcher):
                     const selectors = [
                         'main', 'article', '[role="main"]',
                         '[itemtype*="Product"]', '[itemtype*="Article"]', '[itemtype*="JobPosting"]',
-                        '[class*="product"]', '[class*="price"]', '[class*="job"]',
+                        '[class*="product"]', '[class*="price"]', '[class*="pricing"]', '[class*="plan"]',
+                        '[class*="job"]', '[class*="article"]', '[class*="news"]',
                         '[data-testid*="product"]'
                     ];
                     const seen = new Set();
@@ -428,7 +447,10 @@ class PlaywrightFetcher(BaseFetcher):
         is_shell_page: bool = False,
         retry_count: int = 0,
         redirect_chain: list[str] | None = None,
+        raw_error: str = "",
+        shell_markers: list[str] | None = None,
     ) -> dict[str, object]:
+        normalized_headers = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
         return {
             "failure_stage": stage,
             "failure_reason": reason,
@@ -436,10 +458,20 @@ class PlaywrightFetcher(BaseFetcher):
             "original_url": original_url,
             "final_url": final_url,
             "redirect_chain": list(redirect_chain or []),
-            "content_type": str((headers or {}).get("content-type") or ""),
+            "content_type": str(normalized_headers.get("content-type") or ""),
+            "content_encoding": str(normalized_headers.get("content-encoding") or ""),
+            "response_headers": _diagnostic_headers(headers or {}),
             "body_size": int(body_size or 0),
             "is_shell_page": bool(is_shell_page),
             "retry_count": int(retry_count or 0),
+            "raw_error": str(raw_error or ""),
+            "shell_markers": list(shell_markers or []),
+            "preflight_type_mismatch": str(
+                normalized_headers.get("x-smart-preflight-type-mismatch") or ""
+            ),
+            "dom_text_length_before": int(normalized_headers.get("x-smart-dom-text-length-before") or 0),
+            "dom_text_length_after": int(normalized_headers.get("x-smart-dom-text-length-after") or 0),
+            "dom_text_length_delta": int(normalized_headers.get("x-smart-dom-text-length-delta") or 0),
         }
 
     def _maybe_early_stop_challenge(
@@ -529,9 +561,21 @@ class PlaywrightFetcher(BaseFetcher):
                         "product",
                         "price",
                         "pricing",
+                        "plan",
+                        "plans",
                         "job",
+                        "jobs",
                         "career",
+                        "careers",
+                        "greenhouse",
+                        "lever",
+                        "ashby",
+                        "workday",
+                        "icims",
+                        "smartrecruiters",
                         "posting",
+                        "article",
+                        "news",
                         "search",
                         "announcement",
                         "notice",
@@ -612,6 +656,7 @@ class PlaywrightFetcher(BaseFetcher):
             status_code = response.status if response else 0
             headers = dict(response.headers) if response else {}
             self._wait_for_core_selectors(page)
+            dom_stability = self._measure_dom_stability(page)
             if bool(getattr(self._config, "challenge_early_stop_enabled", True)):
                 early_assessment = self._maybe_early_stop_challenge(
                     page,
@@ -620,6 +665,7 @@ class PlaywrightFetcher(BaseFetcher):
                 )
                 if early_assessment is not None:
                     html = page.content()
+                    shell_markers = _detect_shell_markers(html, headers=headers)
                     headers = {
                         **headers,
                         "x-smart-fetch-attempt-reason": attempt.reason,
@@ -646,6 +692,7 @@ class PlaywrightFetcher(BaseFetcher):
                             body_size=len(html or ""),
                             is_shell_page=True,
                             retry_count=retry_count_offset,
+                            shell_markers=shell_markers,
                         ),
                     ), early_assessment
             try:
@@ -694,6 +741,7 @@ class PlaywrightFetcher(BaseFetcher):
                         )
             if captured_json:
                 html = self._append_captured_json_hints(html, captured_json)
+            shell_markers = _detect_shell_markers(html, headers=headers)
             headers = {
                 **headers,
                 "x-smart-fetch-attempt-reason": attempt.reason,
@@ -701,6 +749,9 @@ class PlaywrightFetcher(BaseFetcher):
                 "x-smart-fetch-json-responses": str(len(captured_json)),
                 "x-smart-fetch-html-length": str(len(html or "")),
                 "x-smart-reader-mode-blocks": "1" if reader_html else "0",
+                "x-smart-dom-text-length-before": str(dom_stability.get("dom_text_length_before", 0)),
+                "x-smart-dom-text-length-after": str(dom_stability.get("dom_text_length_after", 0)),
+                "x-smart-dom-text-length-delta": str(dom_stability.get("dom_text_length_delta", 0)),
             }
             assessment = self._assess_page(
                 page,
@@ -730,6 +781,7 @@ class PlaywrightFetcher(BaseFetcher):
                     body_size=len(html or ""),
                     is_shell_page=assessment.shell_page or assessment.challenge,
                     retry_count=retry_count_offset + reload_count,
+                    shell_markers=shell_markers,
                 ),
             )
             return result, assessment
@@ -746,6 +798,7 @@ class PlaywrightFetcher(BaseFetcher):
                     stage="render",
                     reason=_classify_playwright_error(exc),
                     retry_count=retry_count_offset,
+                    raw_error=error_message,
                 ),
             )
             return result, assessment
@@ -816,6 +869,10 @@ class PlaywrightFetcher(BaseFetcher):
                 "x-smart-url-preflight-repair-reason": preflight.repair_reason,
                 "x-smart-final-url": preflight.final_url,
                 "x-smart-canonical-url": preflight.canonical_url,
+                "x-smart-preflight-type-mismatch": preflight.headers.get(
+                    "x-smart-preflight-type-mismatch",
+                    "",
+                ),
             }
             if (
                 not preflight.reachable

@@ -145,6 +145,36 @@ def test_preflight_rejects_unsafe_canonical_to_home(monkeypatch):
     assert result.headers["x-smart-canonical-rejected"] == "https://example.com/"
 
 
+def test_preflight_marks_product_redirect_to_generic_region_page(monkeypatch):
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def head(self, url, headers):
+            return httpx.Response(
+                200,
+                request=httpx.Request("HEAD", "https://example.com/region"),
+                content=b"<html><title>Select your region</title></html>",
+            )
+
+        def stream(self, method, url, headers):
+            raise AssertionError("GET probe should not be needed for simple 200 HEAD")
+
+    monkeypatch.setattr("smart_extractor.fetcher.url_preflight.httpx.Client", FakeClient)
+
+    result = preflight_url("https://example.com/products/widget-1")
+
+    assert result.final_url == "https://example.com/region"
+    assert result.repair_reason == "redirect"
+    assert result.headers["x-smart-preflight-type-mismatch"] == "product_redirected_to_generic_page"
+
+
 def test_extract_canonical_url_resolves_relative_href():
     html = '<html><head><link rel="canonical" href="../product"></head></html>'
 

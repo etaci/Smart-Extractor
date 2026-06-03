@@ -107,7 +107,16 @@ def _build_fetch_runtime_metrics(
             "final_url": "",
             "redirect_chain": [],
             "content_type": "",
+            "content_encoding": "",
+            "response_headers": {},
+            "decode_attempted_charsets": [],
+            "request_accept_encoding": "",
+            "playwright_fallback": False,
             "body_size": 0,
+            "raw_error": "",
+            "shell_markers": [],
+            "preflight_type_mismatch": "",
+            "dom_text_length_delta": 0,
             "content_ready": False,
         }
     fetch_headers = (
@@ -146,7 +155,31 @@ def _build_fetch_runtime_metrics(
         "final_url": str(fetch_diagnostics.get("final_url") or ""),
         "redirect_chain": list(fetch_diagnostics.get("redirect_chain") or []),
         "content_type": str(fetch_diagnostics.get("content_type") or ""),
+        "content_encoding": str(fetch_diagnostics.get("content_encoding") or ""),
+        "response_headers": dict(fetch_diagnostics.get("response_headers") or {}),
+        "decode_attempted_charsets": list(
+            fetch_diagnostics.get("decode_attempted_charsets") or []
+        ),
+        "request_accept_encoding": str(
+            fetch_diagnostics.get("request_accept_encoding") or ""
+        ),
+        "playwright_fallback": bool(
+            fetch_diagnostics.get("playwright_fallback")
+            or fetch_headers.get("x-smart-fetch-rescue") == "static_to_dynamic"
+        ),
         "body_size": int(fetch_diagnostics.get("body_size", 0) or 0),
+        "raw_error": str(fetch_diagnostics.get("raw_error") or ""),
+        "shell_markers": list(fetch_diagnostics.get("shell_markers") or []),
+        "preflight_type_mismatch": str(
+            fetch_headers.get("x-smart-preflight-type-mismatch")
+            or fetch_diagnostics.get("preflight_type_mismatch")
+            or ""
+        ),
+        "dom_text_length_delta": int(
+            fetch_diagnostics.get("dom_text_length_delta")
+            or fetch_headers.get("x-smart-dom-text-length-delta")
+            or 0
+        ),
         "content_ready": bool(cleaned_text and not getattr(fetch_result, "is_shell_page", False)),
     }
 

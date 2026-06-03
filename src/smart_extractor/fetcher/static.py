@@ -38,6 +38,18 @@ def _classify_transport_error(exc: Exception) -> str:
     return type(exc).__name__
 
 
+def _classify_http_status(status_code: int) -> str:
+    if status_code in {401, 403}:
+        return "blocked"
+    if status_code == 429:
+        return "rate_limit"
+    if status_code in {404, 410}:
+        return "not_found"
+    if 400 <= int(status_code or 0) < 600:
+        return "http_400_500"
+    return ""
+
+
 class StaticFetcher(BaseFetcher):
     """HTTPX-based fetcher with proxy-pool retry and challenge detection."""
 
@@ -113,26 +125,42 @@ class StaticFetcher(BaseFetcher):
         is_shell_page: bool = False,
         retry_count: int = 0,
         redirect_chain: list[str] | None = None,
+        raw_error: str = "",
+        shell_markers: list[str] | None = None,
+        decode_attempted_charsets: list[str] | None = None,
+        request_accept_encoding: str = "",
     ) -> dict[str, object]:
-        content_type = str((headers or {}).get("content-type") or "")
+        normalized_headers = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
+        content_type = str(normalized_headers.get("content-type") or "")
+        content_encoding = str(normalized_headers.get("content-encoding") or "")
+        resolved_reason = reason or _classify_http_status(status_code) or ("shell_page" if is_shell_page else "")
         return {
             "failure_stage": stage,
-            "failure_reason": reason,
+            "failure_reason": resolved_reason,
             "http_status": int(status_code or 0),
             "original_url": original_url,
             "final_url": final_url,
             "redirect_chain": list(redirect_chain or []),
             "content_type": content_type,
+            "content_encoding": content_encoding,
+            "response_headers": _diagnostic_headers(headers or {}),
+            "request_accept_encoding": request_accept_encoding,
+            "decode_attempted_charsets": list(decode_attempted_charsets or []),
             "body_size": int(body_size or 0),
             "is_shell_page": bool(is_shell_page),
             "retry_count": int(retry_count or 0),
+            "raw_error": str(raw_error or ""),
+            "shell_markers": list(shell_markers or []),
+            "preflight_type_mismatch": str(
+                normalized_headers.get("x-smart-preflight-type-mismatch") or ""
+            ),
         }
 
     @staticmethod
-    def _read_response_text(response: httpx.Response) -> tuple[str, str]:
+    def _read_response_text(response: httpx.Response) -> tuple[str, str, list[str]]:
         content = response.content or b""
         if not content:
-            return "", ""
+            return "", "", []
         encodings: list[str] = []
         if response.encoding:
             encodings.append(str(response.encoding))
@@ -155,19 +183,21 @@ class StaticFetcher(BaseFetcher):
                 continue
             replacement_ratio = text.count("\ufffd") / max(len(text), 1)
             if replacement_ratio <= 0.01:
-                return text, "" if not first_error else f"decode_recovered:{encoding}"
+                return text, "" if not first_error else f"decode_recovered:{encoding}", list(seen)
         try:
             import charset_normalizer
 
             detected = charset_normalizer.from_bytes(content).best()
             if detected is not None:
-                return str(detected), "decode_recovered:charset_normalizer"
+                seen.add("charset_normalizer")
+                return str(detected), "decode_recovered:charset_normalizer", list(seen)
         except Exception:
             pass
         try:
-            return content.decode("utf-8", errors="replace"), first_error or "decode_error: fallback_replace"
+            seen.add("utf-8-replace")
+            return content.decode("utf-8", errors="replace"), first_error or "decode_error: fallback_replace", list(seen)
         except Exception as exc:
-            return "", f"decode_error: {type(exc).__name__}: {exc}"
+            return "", f"decode_error: {type(exc).__name__}: {exc}", list(seen)
 
     def _get_with_decode_fallback(
         self,
@@ -180,7 +210,7 @@ class StaticFetcher(BaseFetcher):
         except (httpx.DecodingError, UnicodeError) as exc:
             logger.warning("StaticFetcher decode failed, retrying with identity encoding: {}", exc)
             response = client.get(url, headers=self._identity_headers(headers))
-            return response, f"decode_retry: {type(exc).__name__}"
+            return response, f"decode_retry: {type(exc).__name__}: {exc}"
 
     def _fetch_rss_fallback(self, url: str, previous: FetchResult | None) -> FetchResult | None:
         parts = urlsplit(url)
@@ -262,6 +292,13 @@ class StaticFetcher(BaseFetcher):
                     "x-smart-dynamic-html-length": str(len(result.html or "")),
                     "x-smart-fetch-rescue": "static_to_dynamic",
                 }
+                result.diagnostics = {
+                    **(result.diagnostics or {}),
+                    "playwright_fallback": True,
+                    "static_failure_reason": (previous.diagnostics or {}).get("failure_reason", ""),
+                    "static_content_encoding": (previous.diagnostics or {}).get("content_encoding", ""),
+                    "static_raw_error": (previous.diagnostics or {}).get("raw_error", ""),
+                }
             return result
         except Exception as exc:
             logger.warning("StaticFetcher Playwright fallback failed: {}", exc)
@@ -327,7 +364,7 @@ class StaticFetcher(BaseFetcher):
                 client = self._ensure_client(attempt.proxy_url or None)
                 request_headers = self._build_headers(mobile=bool(attempt.mobile_user_agent))
                 response, decode_retry = self._get_with_decode_fallback(client, url, request_headers)
-                html, decode_error = self._read_response_text(response)
+                html, decode_error, decode_charsets = self._read_response_text(response)
                 decode_error = decode_error or decode_retry
                 headers = dict(response.headers)
                 if decode_error:
@@ -338,6 +375,11 @@ class StaticFetcher(BaseFetcher):
                         "x-smart-final-url": preflight.final_url if preflight else str(response.url),
                         "x-smart-canonical-url": preflight.canonical_url if preflight else "",
                         "x-smart-url-preflight-repair-reason": preflight.repair_reason if preflight else "",
+                        "x-smart-preflight-type-mismatch": (
+                            preflight.headers.get("x-smart-preflight-type-mismatch", "")
+                            if preflight
+                            else ""
+                        ),
                         "x-smart-fetch-attempt-reason": attempt.reason,
                         "x-smart-fetch-mobile-ua": "1" if attempt.mobile_user_agent else "0",
                         "x-smart-fetch-html-length": str(len(html or "")),
@@ -348,6 +390,7 @@ class StaticFetcher(BaseFetcher):
                     headers=headers,
                     status_code=response.status_code,
                 )
+                shell_markers = _detect_shell_markers(html, headers=headers)
                 last_result = FetchResult(
                     url=url,
                     html=html,
@@ -367,6 +410,10 @@ class StaticFetcher(BaseFetcher):
                         is_shell_page=assessment.shell_page or assessment.challenge,
                         retry_count=attempt_index - 1,
                         redirect_chain=[str(item.url) for item in getattr(response, "history", [])] + [str(response.url)],
+                        raw_error=decode_error,
+                        shell_markers=shell_markers,
+                        decode_attempted_charsets=decode_charsets,
+                        request_accept_encoding=str(request_headers.get("Accept-Encoding") or ""),
                     ),
                 )
                 if assessment.retryable and attempt_index < len(attempts):
@@ -397,6 +444,7 @@ class StaticFetcher(BaseFetcher):
                         stage="transport",
                         reason=_classify_transport_error(exc),
                         retry_count=attempt_index - 1,
+                        raw_error=error_message,
                     ),
                 )
                 logger.warning(
@@ -474,3 +522,44 @@ def _extract_feed_item_html(feed_text: str, slug: str) -> str:
         ]
         return "<html><body>" + "\n".join(part for part in parts if part) + "</body></html>"
     return ""
+
+
+def _detect_shell_markers(html: str, *, headers: dict[str, str] | None = None) -> list[str]:
+    text = str(html or "")[:5000].lower()
+    normalized_headers = {str(key).lower(): str(value).lower() for key, value in (headers or {}).items()}
+    marker_map = {
+        "cloudflare": ("cloudflare", "cf-ray", "cf-chl", "just a moment"),
+        "captcha": ("captcha", "robot check", "verify you are human"),
+        "access_denied": ("access denied", "forbidden", "403 forbidden"),
+        "js_required": ("enable javascript", "javascript is disabled"),
+        "loading_shell": ("loading", "please wait", "initializing"),
+        "rate_limited": ("too many requests", "rate limit", "429"),
+    }
+    found: list[str] = []
+    header_blob = " ".join([*normalized_headers.keys(), *normalized_headers.values()])
+    for name, markers in marker_map.items():
+        if any(marker in text or marker in header_blob for marker in markers):
+            found.append(name)
+    return found
+
+
+def _diagnostic_headers(headers: dict[str, str]) -> dict[str, str]:
+    allowed = {
+        "content-type",
+        "content-encoding",
+        "server",
+        "cf-ray",
+        "cf-cache-status",
+        "x-cache",
+        "x-served-by",
+        "x-akamai-session-info",
+        "x-sucuri-block",
+        "retry-after",
+        "location",
+    }
+    result: dict[str, str] = {}
+    for key, value in (headers or {}).items():
+        normalized_key = str(key).lower()
+        if normalized_key in allowed or normalized_key.startswith("x-smart-"):
+            result[normalized_key] = str(value)[:500]
+    return result

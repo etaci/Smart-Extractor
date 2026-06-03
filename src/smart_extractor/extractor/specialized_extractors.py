@@ -13,9 +13,25 @@ from smart_extractor.utils.display import build_field_labels
 
 
 _SPECIALIZED_FIELDS = {
-    "product": ["name", "price", "brand", "availability", "description"],
-    "pricing": ["plan", "price", "billing_period", "description", "summary"],
-    "job": ["title", "company", "salary_range", "location", "requirements"],
+    "product": ["name", "price", "brand", "sku", "gtin", "availability", "description"],
+    "pricing": [
+        "plan",
+        "price",
+        "billing_period",
+        "free_tier",
+        "enterprise_tier",
+        "description",
+        "summary",
+    ],
+    "job": [
+        "title",
+        "company",
+        "salary_range",
+        "location",
+        "employment_type",
+        "job_id",
+        "requirements",
+    ],
     "news": ["title", "publish_date", "author", "summary", "content"],
     "notice": ["title", "publish_date", "agency", "summary", "content"],
     "policy": ["title", "publish_date", "agency", "policy_number", "content"],
@@ -24,6 +40,7 @@ _SPECIALIZED_FIELDS = {
 _ALL_HINT_FIELDS = {
     "agency",
     "author",
+    "ats_platform",
     "availability",
     "billing_period",
     "brand",
@@ -31,6 +48,12 @@ _ALL_HINT_FIELDS = {
     "content",
     "date",
     "description",
+    "employment_type",
+    "enterprise_tier",
+    "free_tier",
+    "gtin",
+    "job_id",
+    "job_page_kind",
     "location",
     "name",
     "organization",
@@ -39,7 +62,9 @@ _ALL_HINT_FIELDS = {
     "price",
     "product",
     "publish_date",
+    "requirements",
     "salary_range",
+    "sku",
     "summary",
     "title",
 }
@@ -158,15 +183,43 @@ def _normalize_page_type(page_type: str, text: str) -> str:
         return normalized
     if normalized in {"article", "blog"}:
         lowered = text.lower()
-        if any(marker in lowered for marker in ("policy", "regulation", "公告", "政策", "通知")):
+        if any(marker in lowered for marker in ("policy", "regulation", "notice", "announcement")):
             return "policy"
         return "news"
     lowered = text.lower()
-    if any(marker in lowered for marker in ("jobposting", "hiringorganization", "salary", "招聘", "岗位")):
+    if any(
+        marker in lowered
+        for marker in (
+            "jobposting",
+            "hiringorganization",
+            "salary",
+            "career",
+            "job id",
+            "\u62db\u8058",
+            "\u5c97\u4f4d",
+            "\u804c\u4f4d",
+            "\u5de5\u7a0b\u5e08",
+            "\u85aa\u8d44",
+            "\u4efb\u804c\u8981\u6c42",
+        )
+    ):
         return "job"
-    if any(marker in lowered for marker in ("pricing", "per seat", "per month", "套餐", "订阅")):
+    if any(marker in lowered for marker in ("pricing", "per seat", "per month", "contact sales", "plan")):
         return "pricing"
-    if any(marker in lowered for marker in ("product", "offers", "price", "availability", "商品")):
+    if any(
+        marker in lowered
+        for marker in (
+            "product",
+            "offers",
+            "price",
+            "availability",
+            "sku",
+            "gtin",
+            "\u5546\u54c1",
+            "\u4ef7\u683c",
+            "\u5e93\u5b58",
+        )
+    ):
         return "product"
     return normalized
 
@@ -215,21 +268,23 @@ def _extract_product(hints: dict[str, str], lines: list[str], text: str) -> Spec
     data = {
         "name": hints.get("name")
         or hints.get("product")
-        or _labeled(lines, ("product name", "name", "商品名称", "商品名", "名称"))
+        or _labeled(lines, ("product name", "name", "title", "\u5546\u54c1\u540d\u79f0"))
         or _pick_title(lines),
-        "price": hints.get("price") or _labeled(lines, ("price", "价格", "售价")) or _price_from_text(text),
-        "brand": hints.get("brand") or _labeled(lines, ("brand", "品牌")),
-        "plan": hints.get("plan") or _labeled(lines, ("plan", "tier", "套餐", "版本")),
+        "price": hints.get("price")
+        or _labeled(lines, ("price", "sale price", "current price", "\u4ef7\u683c"))
+        or _price_from_text(text),
+        "brand": hints.get("brand") or _labeled(lines, ("brand", "vendor", "manufacturer", "\u54c1\u724c")),
+        "sku": hints.get("sku") or _labeled(lines, ("sku", "mpn", "item number")),
+        "gtin": hints.get("gtin") or _labeled(lines, ("gtin", "gtin13", "gtin14", "barcode")),
+        "plan": hints.get("plan") or _labeled(lines, ("plan", "tier", "package", "edition")),
         "billing_period": hints.get("billing_period")
         or _regex_first(
-            r"per\s+(?:seat|user)?/?\s*(?:month|year)|/mo\b|/month\b|monthly|annually|/yr|/year|每月|每年|月付|年付",
+            r"per\s+(?:seat|user)?/?\s*(?:month|year)|per\s+(?:month|year)|/mo\b|/month\b|monthly|annually|/yr|/year",
             text,
         ),
         "availability": hints.get("availability")
-        or _regex_first(
-            r"\b(?:in stock|out of stock|sold out|available|pre[-\s]?order)\b|有货|无货|缺货|现货|售罄",
-            text,
-        ),
+        or _labeled(lines, ("availability", "stock", "\u5e93\u5b58"))
+        or _regex_first(r"\b(?:in stock|out of stock|sold out|available|pre[-\s]?order)\b", text),
         "description": hints.get("summary") or hints.get("description") or _long_line(lines),
     }
     return _result("product", data, hints)
@@ -238,14 +293,18 @@ def _extract_product(hints: dict[str, str], lines: list[str], text: str) -> Spec
 def _extract_pricing(hints: dict[str, str], lines: list[str], text: str) -> SpecializedExtraction:
     data = {
         "plan": hints.get("plan")
-        or _labeled(lines, ("plan", "tier", "套餐", "版本"))
+        or _labeled(lines, ("plan", "tier", "package", "edition"))
         or _pick_title(lines),
         "price": hints.get("price") or _price_from_text(text),
         "billing_period": hints.get("billing_period")
         or _regex_first(
-            r"per\s+(?:seat|user)?/?\s*(?:month|year)|/mo\b|/month\b|monthly|annually|/yr|/year|每月|每年|月付|年付",
+            r"per\s+(?:seat|user)?/?\s*(?:month|year)|per\s+(?:month|year)|/mo\b|/month\b|monthly|annually|/yr|/year",
             text,
         ),
+        "free_tier": hints.get("free_tier")
+        or _regex_first(r"\bfree\b(?:\s+(?:plan|tier|forever))?|\$0(?:\s*/\s*(?:mo|month|year))?", text),
+        "enterprise_tier": hints.get("enterprise_tier")
+        or _regex_first(r"\benterprise\b|\bcontact\s+sales\b|custom pricing|talk to sales", text),
         "description": hints.get("summary") or hints.get("description") or _long_line(lines),
         "summary": hints.get("summary") or _long_line(lines, limit=120),
     }
@@ -257,17 +316,23 @@ def _extract_job(hints: dict[str, str], lines: list[str], text: str) -> Speciali
         "title": hints.get("title") or hints.get("name") or _pick_title(lines),
         "company": hints.get("company")
         or hints.get("organization")
-        or _labeled(lines, ("company", "hiring organization", "公司", "招聘方")),
+        or _labeled(lines, ("company", "hiring organization", "organization", "team", "\u516c\u53f8")),
         "salary_range": hints.get("salary_range")
+        or _labeled(lines, ("salary", "salary range", "\u85aa\u8d44"))
         or _regex_first(
-            r"(?:[$€£¥]\s?\d[\d,.]*\s*[-~至]\s*[$€£¥]?\s?\d[\d,.]*(?:/[^\s]+)?|\d+(?:k|K|千|万)?\s*[-~至]\s*\d+(?:k|K|千|万)?(?:/[^\s]+)?)",
+            r"(?:[$]\s?\d[\d,.]*\s*(?:-|~|to)\s*[$]?\s?\d[\d,.]*(?:/[^\s]+)?|\d+(?:k|K)\s*(?:-|~|to)\s*\d+(?:k|K)(?:/[^\s]+)?)",
             text,
         ),
         "location": hints.get("location")
-        or _labeled(lines, ("location", "地点", "城市", "工作地点")),
+        or _labeled(lines, ("location", "city", "work location", "\u5de5\u4f5c\u5730\u70b9", "\u5730\u70b9")),
+        "employment_type": hints.get("employment_type")
+        or _labeled(lines, ("employment type", "job type", "commitment", "schedule")),
+        "job_id": hints.get("job_id")
+        or _labeled(lines, ("job id", "job number", "requisition id", "req id", "ref number")),
         "requirements": hints.get("requirements")
-        or _labeled(lines, ("requirements", "任职要求", "岗位要求", "要求"))
-        or _section(lines, ("requirements", "任职要求", "岗位要求", "要求")),
+        or hints.get("content")
+        or _labeled(lines, ("requirements", "qualifications", "responsibilities", "\u4efb\u804c\u8981\u6c42"))
+        or _section(lines, ("requirements", "qualifications", "responsibilities", "\u4efb\u804c\u8981\u6c42")),
     }
     return _result("job", data, hints)
 
@@ -282,11 +347,8 @@ def _extract_article_like(
         "title": hints.get("title") or _pick_title(lines),
         "publish_date": hints.get("publish_date")
         or hints.get("date")
-        or _regex_first(
-            r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b|\b(?:19|20)\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}",
-            text,
-        ),
-        "author": hints.get("author") or _labeled(lines, ("author", "作者", "发布者")),
+        or _regex_first(r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b|\b(?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2}", text),
+        "author": hints.get("author") or _labeled(lines, ("author", "byline")),
         "summary": hints.get("summary") or hints.get("description") or _long_line(lines, limit=160),
         "content": hints.get("content")
         or "\n".join([line for line in lines if len(line) > 24][:8])[:1600],
@@ -300,9 +362,9 @@ def _extract_policy(hints: dict[str, str], lines: list[str], text: str) -> Speci
         {
             "agency": hints.get("agency")
             or hints.get("organization")
-            or _labeled(lines, ("agency", "department", "机构", "部门", "发布机关")),
+            or _labeled(lines, ("agency", "department", "publisher", "issuer")),
             "policy_number": hints.get("policy_number")
-            or _regex_first(r"(?:No\.?|编号|文号)[:：\s]*([A-Za-z0-9][A-Za-z0-9\-〔〕\[\]号]+)", text),
+            or _regex_first(r"(?:No\.?|number|document no\.?)[:\s]*([A-Za-z0-9][A-Za-z0-9\-./ ]+)", text),
         }
     )
     return _result("policy", base, hints)
@@ -315,6 +377,11 @@ def _result(page_type: str, data: dict[str, Any], hints: dict[str, str]) -> Spec
         for key in cleaned
         if key in hints or (key == "name" and "product" in hints)
     }
+    if page_type == "job":
+        if hints.get("ats_platform"):
+            hint_hits["_ats_platform"] = hints["ats_platform"]
+        if hints.get("job_page_kind"):
+            hint_hits["_job_page_kind"] = hints["job_page_kind"]
     confidence = min(0.98, 0.45 + len(cleaned) * 0.12 + len(hint_hits) * 0.08)
     return SpecializedExtraction(
         page_type=page_type,
@@ -342,7 +409,7 @@ def _long_line(lines: list[str], *, limit: int = 240) -> str:
 def _labeled(lines: list[str], aliases: tuple[str, ...]) -> str:
     for line in lines:
         for alias in aliases:
-            matched = re.search(rf"^{re.escape(alias)}\s*[:：]\s*(.+)$", line, flags=re.I)
+            matched = re.search(rf"^{re.escape(alias)}\s*[:\uff1a]\s*(.+)$", line, flags=re.I)
             if matched:
                 return matched.group(1).strip()
     return ""
@@ -357,7 +424,7 @@ def _section(lines: list[str], aliases: tuple[str, ...]) -> str:
 
 def _price_from_text(text: str) -> str:
     return _regex_first(
-        r"(?:from\s+|starting\s+at\s+|starts\s+at\s+)?(?:[$€£¥]\s?\d[\d,.]*|\d[\d,.]*\s?(?:USD|EUR|GBP|CNY|RMB))(?:\s*(?:/mo|/month|per month|per seat/month|monthly|/yr|/year|annually))?",
+        r"(?:from\s+|starting\s+at\s+|starts\s+at\s+)?(?:[$]\s?\d[\d,.]*|\d[\d,.]*\s?(?:USD|EUR|GBP|CNY|RMB))(?:\s*(?:/mo|/month|per month|per seat/month|monthly|/yr|/year|annually))?",
         text,
     )
 

@@ -116,6 +116,72 @@ def test_static_fetcher_retries_decode_failure_with_identity_encoding(monkeypatc
     assert result.is_success is True
     assert fake_client.calls[1]["Accept-Encoding"] == "identity"
     assert result.diagnostics["failure_reason"].startswith("decode_retry")
+    assert result.diagnostics["content_type"] == "text/html"
+    assert result.diagnostics["response_headers"]["content-type"] == "text/html"
+    assert result.diagnostics["request_accept_encoding"] == "gzip, deflate, br"
+    assert "utf-8" in result.diagnostics["decode_attempted_charsets"]
+    assert "raw_error" in result.diagnostics
+
+
+def test_static_fetcher_records_shell_markers_and_content_encoding(monkeypatch):
+    fetcher = StaticFetcher(FetcherConfig(url_preflight_enabled=False, static_fallback_to_dynamic=False))
+
+    class FakeClient:
+        def get(self, url, headers):
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", url),
+                content=b"<html><title>Just a moment</title><body>Checking your browser</body></html>",
+                headers={"content-type": "text/html", "content-encoding": "br", "cf-ray": "abc"},
+            )
+
+    monkeypatch.setattr(fetcher, "_ensure_client", lambda proxy_url=None: FakeClient())
+
+    result = fetcher.fetch("https://example.com/product/widget")
+
+    assert result.is_shell_page is True
+    assert result.diagnostics["content_encoding"] == "br"
+    assert result.diagnostics["response_headers"]["content-encoding"] == "br"
+    assert result.diagnostics["response_headers"]["cf-ray"] == "abc"
+    assert "cloudflare" in result.diagnostics["shell_markers"]
+
+
+def test_static_fetcher_dynamic_fallback_records_static_decode_context(monkeypatch):
+    fetcher = StaticFetcher(FetcherConfig(static_fallback_to_dynamic=True))
+    previous = FetchResult(
+        url="https://example.com",
+        status_code=200,
+        html="<html><body>Loading</body></html>",
+        diagnostics={
+            "failure_reason": "decode_error",
+            "content_encoding": "br",
+            "raw_error": "DecodingError: broken br",
+        },
+    )
+
+    class FakeDynamicFetcher:
+        def __init__(self, config):
+            self.config = config
+
+        def fetch(self, url):
+            return FetchResult(
+                url=url,
+                html="<html><body>real content</body></html>",
+                status_code=200,
+                diagnostics={"failure_stage": "fetch", "failure_reason": ""},
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("smart_extractor.fetcher.playwright.PlaywrightFetcher", FakeDynamicFetcher)
+
+    result = fetcher._fetch_dynamic_fallback("https://example.com", previous)
+
+    assert result.diagnostics["playwright_fallback"] is True
+    assert result.diagnostics["static_failure_reason"] == "decode_error"
+    assert result.diagnostics["static_content_encoding"] == "br"
+    assert result.diagnostics["static_raw_error"] == "DecodingError: broken br"
 
 
 def test_static_fetcher_uses_rss_fallback_for_shell_page(monkeypatch):
