@@ -255,6 +255,54 @@ def test_structured_hints_extracts_icims_platform_and_job_page_kind():
     assert "requirements: Build resilient crawlers" in hints
 
 
+def test_structured_hints_extracts_company_careers_job_list_card():
+    html = """
+    <html><head>
+      <script type="application/json">
+      {
+        "careers": {
+          "postings": [
+            {
+              "title": "Senior Platform Engineer",
+              "companyName": "Acme Careers",
+              "location": "Singapore",
+              "salaryRange": "120k-160k SGD",
+              "jobId": "CAREER-88",
+              "employmentType": "Full-time"
+            },
+            {
+              "title": "Frontend Engineer",
+              "location": "Remote"
+            }
+          ]
+        }
+      }
+      </script>
+    </head><body></body></html>
+    """
+
+    hints = build_structured_hints(
+        html,
+        selected_fields=[
+            "title",
+            "company",
+            "location",
+            "salary_range",
+            "job_id",
+            "employment_type",
+            "job_page_kind",
+        ],
+    )
+
+    assert "job_page_kind: list" in hints
+    assert "title: Senior Platform Engineer" in hints
+    assert "company: Acme Careers" in hints
+    assert "location: Singapore" in hints
+    assert "salary_range: 120k-160k SGD" in hints
+    assert "job_id: CAREER-88" in hints
+    assert "employment_type: Full-time" in hints
+
+
 def test_structured_hints_extracts_pricing_free_and_enterprise_tiers():
     html = """
     <html><head>

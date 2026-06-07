@@ -191,12 +191,46 @@ class DataValidator:
                 continue
 
             field_name_lower = field_name.lower()
+            if self._looks_like_mojibake(value):
+                result.status = "partial_success" if result.is_valid else result.status
+                result.add_warning(f"decode_mojibake_suspected: field '{field_name}'")
+                result.field_incomplete_reason = (
+                    result.field_incomplete_reason or "decode_mojibake_suspected"
+                )
             if "url" in field_name_lower and not self._URL_PATTERN.match(value):
                 result.add_warning(f"字段 '{field_name}' 不是标准 URL: {value[:60]}")
             if "date" in field_name_lower and not self._DATE_PATTERN.match(value):
                 result.add_warning(f"字段 '{field_name}' 日期格式可能不标准: {value}")
             if ("price" in field_name_lower or "salary" in field_name_lower) and not self._PRICE_PATTERN.match(value.strip()):
                 result.add_warning(f"字段 '{field_name}' 数值格式可能不标准: {value}")
+
+    @staticmethod
+    def _looks_like_mojibake(value: str) -> bool:
+        text = str(value or "")
+        if len(text.strip()) < 4:
+            return False
+        replacement_count = text.count("\ufffd")
+        suspicious_markers = (
+            "\u935a",
+            "\u935f",
+            "\u934f",
+            "\u941e",
+            "\u951f",
+            "\u9e93",
+            "\u6d93",
+            "\u7efb",
+            "\u00c3",
+            "\u00e2",
+        )
+        suspicious_count = replacement_count + sum(
+            text.count(marker) for marker in suspicious_markers
+        )
+        if suspicious_count >= 2:
+            return True
+        if replacement_count and replacement_count / max(len(text), 1) >= 0.02:
+            return True
+        ascii_letters = sum(1 for char in text if char.isascii() and char.isalpha())
+        return "\u00c3" in text and ascii_letters >= 2
 
     def _calculate_quality_score(self, result: ValidationResult) -> float:
         score = result.completeness_score

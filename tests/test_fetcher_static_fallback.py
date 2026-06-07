@@ -217,3 +217,5 @@ def test_static_fetcher_uses_rss_fallback_for_shell_page(monkeypatch):
     assert "Widget News" in result.html
     assert result.headers["x-smart-fetch-rescue"] == "rss_fallback"
     assert result.diagnostics["failure_reason"] == "rss_fallback"
+    assert "utf-8" in result.diagnostics["decode_attempted_charsets"]
+    assert result.diagnostics["request_accept_encoding"] == "gzip, deflate, br"

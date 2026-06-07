@@ -229,24 +229,31 @@ class StaticFetcher(BaseFetcher):
                 continue
             if response.status_code >= 400:
                 continue
-            html = _extract_feed_item_html(response.text, slug)
+            feed_text, decode_error, decode_charsets = self._read_response_text(response)
+            html = _extract_feed_item_html(feed_text, slug)
             if not html:
                 continue
+            response_headers = dict(response.headers)
+            if decode_error:
+                response_headers["x-smart-decode-fallback"] = decode_error
             diagnostics = self._build_diagnostics(
                 stage="feed_fallback",
                 reason="rss_fallback",
                 status_code=response.status_code,
                 final_url=feed_url,
-                headers=dict(response.headers),
+                headers=response_headers,
                 body_size=len(html),
                 retry_count=(previous.retry_count if previous else 0) + 1,
+                raw_error=decode_error,
+                decode_attempted_charsets=decode_charsets,
+                request_accept_encoding=str(headers.get("Accept-Encoding") or ""),
             )
             return FetchResult(
                 url=url,
                 html=html,
                 status_code=200,
                 headers={
-                    **dict(response.headers),
+                    **response_headers,
                     "x-smart-fetch-rescue": "rss_fallback",
                     "x-smart-final-url": feed_url,
                 },

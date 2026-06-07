@@ -391,13 +391,14 @@ def _extract_hydration_hints(payload: Any) -> dict[str, str]:
     for item in _walk_any_payload(payload):
         if not isinstance(item, dict):
             continue
-        normalized_keys = {str(key).strip().lower(): key for key in item.keys()}
+        normalized_keys = _normalized_key_map(item)
         item_type = _json_type(item)
         ats_platform = _detect_ats_platform(item, normalized_keys)
         if ats_platform:
             hints.setdefault("ats_platform", ats_platform)
         if _looks_like_job_list(item, normalized_keys):
             hints.setdefault("job_page_kind", "list")
+            _merge_hints(hints, _extract_job_list_hints(item, normalized_keys))
         authoritative_job_payload = any(
             key in normalized_keys
             for key in ("jobpostingtitle", "jobrequisitionid", "locationstext", "jobtitle", "jobnumber")
@@ -481,7 +482,7 @@ def _extract_hydration_hints(payload: Any) -> dict[str, str]:
             for variant in item.get("variants") or []:
                 if not isinstance(variant, dict):
                     continue
-                variant_keys = {str(key).strip().lower(): key for key in variant.keys()}
+                variant_keys = _normalized_key_map(variant)
                 price = _first_key_value(
                     variant,
                     variant_keys,
@@ -665,7 +666,7 @@ def _extract_hydration_hints(payload: Any) -> dict[str, str]:
             for variant in item.get("variants") or []:
                 if not isinstance(variant, dict):
                     continue
-                variant_keys = {str(key).strip().lower(): key for key in variant.keys()}
+                variant_keys = _normalized_key_map(variant)
                 availability = _first_key_value(
                     variant,
                     variant_keys,
@@ -702,6 +703,107 @@ def _first_key_value(
             value = _normalize_value(item.get(key))
             if value:
                 return value
+    return ""
+
+
+def _normalized_key_map(item: dict[str, Any]) -> dict[str, Any]:
+    mapping: dict[str, Any] = {}
+    for key in item.keys():
+        lowered = str(key).strip().lower()
+        compact = re.sub(r"[^a-z0-9]+", "", lowered)
+        if lowered:
+            mapping.setdefault(lowered, key)
+        if compact:
+            mapping.setdefault(compact, key)
+    return mapping
+
+
+def _extract_job_list_hints(
+    item: dict[str, Any],
+    normalized_keys: dict[str, Any],
+) -> dict[str, str]:
+    for key in ("jobs", "postings", "openings", "positions", "joblist", "results"):
+        original_key = normalized_keys.get(key)
+        value = item.get(original_key) if original_key is not None else None
+        if not isinstance(value, list):
+            continue
+        for candidate in value:
+            if not isinstance(candidate, dict):
+                continue
+            hints = _extract_job_card_hints(candidate)
+            if hints:
+                return hints
+    return {}
+
+
+def _extract_job_card_hints(card: dict[str, Any]) -> dict[str, str]:
+    normalized_keys = _normalized_key_map(card)
+    hints: dict[str, str] = {}
+    title = _first_key_value(
+        card,
+        normalized_keys,
+        ("title", "jobtitle", "jobpostingtitle", "text", "name"),
+    )
+    if title:
+        hints["title"] = title
+    company = _first_key_value(
+        card,
+        normalized_keys,
+        ("company", "companyname", "hiringorganization", "organization", "department", "team"),
+    )
+    if company:
+        hints["company"] = _normalize_value(company)
+    location = _first_key_value(
+        card,
+        normalized_keys,
+        ("location", "locations", "locationstext", "joblocation", "address", "office"),
+    )
+    if location:
+        hints["location"] = _normalize_value(location)
+    salary = _first_key_value(
+        card,
+        normalized_keys,
+        ("salary", "salaryrange", "compensation", "payrange", "basepay", "basesalary"),
+    ) or _salary_from_metadata(card)
+    if salary:
+        hints["salary_range"] = _normalize_value(salary)
+    job_id = _first_key_value(
+        card,
+        normalized_keys,
+        ("id", "jobid", "jobpostingid", "jobrequisitionid", "requisitionid", "reqid", "jobnumber"),
+    )
+    if job_id:
+        hints["job_id"] = job_id
+    employment_type = _first_key_value(
+        card,
+        normalized_keys,
+        ("employmenttype", "commitment", "jobtype", "worktype", "schedule"),
+    )
+    if employment_type:
+        hints["employment_type"] = employment_type
+    return hints
+
+
+def _salary_from_metadata(card: dict[str, Any]) -> str:
+    metadata = card.get("metadata") or card.get("fields") or card.get("tags")
+    if not isinstance(metadata, list):
+        return ""
+    for item in metadata:
+        if not isinstance(item, dict):
+            continue
+        blob = " ".join(str(value).lower() for value in item.values())
+        if not any(marker in blob for marker in ("salary", "compensation", "pay", "$")):
+            continue
+        value = (
+            item.get("value")
+            or item.get("text")
+            or item.get("label")
+            or item.get("name")
+            or item.get("content")
+        )
+        normalized = _normalize_value(value)
+        if normalized:
+            return normalized
     return ""
 
 
